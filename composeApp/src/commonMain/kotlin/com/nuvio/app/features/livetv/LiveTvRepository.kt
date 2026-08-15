@@ -6,14 +6,20 @@ import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -22,6 +28,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.io.encoding.Base64
+
+private const val XTREAM_EPG_LIMIT = 96
+private const val XTREAM_EPG_MAX_CONCURRENCY = 8
+private const val XTREAM_EPG_REQUEST_TIMEOUT_MS = 10_000L
 
 object LiveTvRepository {
     private val mutableUiState = MutableStateFlow(LiveTvUiState())
@@ -321,22 +332,22 @@ object LiveTvRepository {
             LiveTvStorage.saveLocalPlaylistData("")
             LiveTvStorage.saveSourceType(LiveTvSourceType.Xtream)
             LiveTvStorage.saveXtreamSettings(effectiveSettings)
+            val favoriteUrls = mutableUiState.value.favoriteUrls
+            val hasFavoriteXtreamChannels = channels.any { channel ->
+                channel.streamUrl in favoriteUrls && !channel.xtreamStreamId.isNullOrBlank()
+            }
             mutableUiState.value = LiveTvUiState(
                 sourceType = LiveTvSourceType.Xtream,
                 sourceUrl = effectiveSettings.serverUrl,
                 stalkerSettings = mutableUiState.value.stalkerSettings,
                 xtreamSettings = effectiveSettings,
                 channels = channels,
-                favoriteUrls = mutableUiState.value.favoriteUrls,
+                favoriteUrls = favoriteUrls,
                 recentChannel = mutableUiState.value.recentChannel,
-                isEpgLoading = true,
+                isEpgLoading = hasFavoriteXtreamChannels,
                 isLoaded = true,
             )
-            loadEpgInBackground(
-                sourceUrl = effectiveSettings.serverUrl,
-                epgUrls = listOf(effectiveSettings.xmlTvEndpoint()),
-                requestHeaders = M3U_PLAYLIST_REQUEST_HEADERS,
-            )
+            loadXtreamFavoriteEpgInBackground(effectiveSettings)
             channels
         }.onFailure { error ->
             mutableUiState.value = mutableUiState.value.copy(
@@ -403,6 +414,18 @@ object LiveTvRepository {
             programmesByChannel = retainedProgrammes,
         )
 
+        if (state.sourceType == LiveTvSourceType.Xtream && state.xtreamSettings.isConfigured) {
+            favoriteEpgReloadJob?.cancel()
+            favoriteEpgReloadJob = epgScope.launch {
+                delay(250L)
+                val latestState = mutableUiState.value
+                if (latestState.sourceType == LiveTvSourceType.Xtream && latestState.xtreamSettings.isConfigured) {
+                    loadXtreamFavoriteEpgInBackground(latestState.xtreamSettings)
+                }
+            }
+            return
+        }
+
         if (
             !channel.tvgId.isNullOrBlank() &&
             activeEpgUrls.isNotEmpty() &&
@@ -437,6 +460,76 @@ object LiveTvRepository {
         )
         LiveTvStorage.saveRecentChannel(recentChannel)
         mutableUiState.value = mutableUiState.value.copy(recentChannel = recentChannel)
+    }
+
+    private fun loadXtreamFavoriteEpgInBackground(settings: LiveTvXtreamSettings) {
+        activeEpgSourceUrl = null
+        activeEpgUrls = emptyList()
+        activeEpgRequestHeaders = emptyMap()
+        epgJob?.cancel()
+
+        val state = mutableUiState.value
+        if (state.sourceType != LiveTvSourceType.Xtream || state.xtreamSettings != settings) {
+            return
+        }
+        val favoriteChannels = state.channels.filter { channel ->
+            channel.streamUrl in state.favoriteUrls && !channel.xtreamStreamId.isNullOrBlank()
+        }
+        if (favoriteChannels.isEmpty()) {
+            mutableUiState.value = state.copy(
+                programmesByChannel = emptyMap(),
+                currentProgrammes = emptyMap(),
+                isEpgLoading = false,
+            )
+            return
+        }
+
+        val sourceUrl = state.sourceUrl
+        mutableUiState.value = state.copy(isEpgLoading = true)
+        epgJob = epgScope.launch {
+            val nowEpochMs = LiveTvClock.nowEpochMs()
+            val semaphore = Semaphore(XTREAM_EPG_MAX_CONCURRENCY)
+            val schedules = coroutineScope {
+                favoriteChannels.map { channel ->
+                    async {
+                        semaphore.withPermit {
+                            val programmes = withTimeoutOrNull(XTREAM_EPG_REQUEST_TIMEOUT_MS) {
+                                runCatching {
+                                    LiveTvRepositoryXtream.getFavoriteEpg(
+                                        settings = settings,
+                                        streamId = channel.xtreamStreamId.orEmpty(),
+                                        nowEpochMs = nowEpochMs,
+                                    )
+                                }.getOrDefault(emptyList())
+                            }.orEmpty()
+                            channel.epgKey() to programmes
+                        }
+                    }
+                }.awaitAll().toMap()
+            }
+            if (!isActive) return@launch
+
+            val latestState = mutableUiState.value
+            if (
+                latestState.sourceType == LiveTvSourceType.Xtream &&
+                latestState.sourceUrl == sourceUrl &&
+                latestState.xtreamSettings == settings
+            ) {
+                val favoriteKeys = latestState.channels
+                    .asSequence()
+                    .filter { channel -> channel.streamUrl in latestState.favoriteUrls }
+                    .map(LiveTvChannel::epgKey)
+                    .toSet()
+                val filteredSchedules = schedules
+                    .filterKeys { key -> key in favoriteKeys }
+                    .filterValues(List<LiveTvProgramme>::isNotEmpty)
+                mutableUiState.value = latestState.copy(
+                    programmesByChannel = filteredSchedules,
+                    currentProgrammes = currentXmlTvProgrammes(filteredSchedules, nowEpochMs),
+                    isEpgLoading = false,
+                )
+            }
+        }
     }
 
     private fun loadEpgInBackground(
@@ -626,8 +719,41 @@ private object LiveTvRepositoryXtream {
                 logoUrl = obj.stringValue("stream_icon") ?: obj.stringValue("logo"),
                 group = categoryId?.let(categories::get).orEmpty(),
                 headers = M3U_STREAM_REQUEST_HEADERS,
+                xtreamStreamId = streamId,
             )
         }.distinctBy { it.streamUrl }
+    }
+
+    suspend fun getFavoriteEpg(
+        settings: LiveTvXtreamSettings,
+        streamId: String,
+        nowEpochMs: Long,
+    ): List<LiveTvProgramme> {
+        if (streamId.isBlank()) return emptyList()
+        val parameters = mapOf(
+            "stream_id" to streamId,
+            "limit" to XTREAM_EPG_LIMIT.toString(),
+        )
+        val shortEpg = runCatching {
+            request(
+                settings = settings,
+                action = "get_short_epg",
+                extraParameters = parameters,
+            )
+        }.getOrNull()?.let { response ->
+            parseXtreamEpgListings(response, nowEpochMs)
+        }.orEmpty()
+        if (shortEpg.isNotEmpty()) return shortEpg
+
+        return runCatching {
+            request(
+                settings = settings,
+                action = "get_simple_data_table",
+                extraParameters = mapOf("stream_id" to streamId),
+            )
+        }.getOrNull()?.let { response ->
+            parseXtreamEpgListings(response, nowEpochMs)
+        }.orEmpty()
     }
 
     private suspend fun request(
@@ -649,6 +775,45 @@ private object LiveTvRepositoryXtream {
         }
         return stalkerJson.parseToJsonElement(httpGetTextWithHeaders(url, M3U_PLAYLIST_REQUEST_HEADERS))
     }
+}
+
+internal fun parseXtreamEpgListings(
+    data: JsonElement,
+    nowEpochMs: Long = LiveTvClock.nowEpochMs(),
+): List<LiveTvProgramme> {
+    val listings = (data as? JsonObject)?.arrayValue("epg_listings").orEmpty()
+    return listings.mapNotNull { element ->
+        val obj = element as? JsonObject ?: return@mapNotNull null
+        val startEpochMs = obj.stringValue("start_timestamp").toXtreamEpochMs() ?: return@mapNotNull null
+        val stopEpochMs = obj.stringValue("stop_timestamp").toXtreamEpochMs() ?: return@mapNotNull null
+        if (stopEpochMs <= startEpochMs || stopEpochMs <= nowEpochMs) return@mapNotNull null
+        val title = decodeXtreamText(obj.stringValue("title")).ifBlank { "Untitled" }
+        LiveTvProgramme(
+            title = title,
+            startEpochMs = startEpochMs,
+            stopEpochMs = stopEpochMs,
+            timeLabel = "${LiveTvClock.formatLocalTime(startEpochMs)} – ${LiveTvClock.formatLocalTime(stopEpochMs)}",
+        )
+    }.sortedBy(LiveTvProgramme::startEpochMs)
+        .distinctBy { programme -> Triple(programme.startEpochMs, programme.stopEpochMs, programme.title) }
+}
+
+private fun String?.toXtreamEpochMs(): Long? {
+    val value = this?.trim()?.toLongOrNull() ?: return null
+    return if (value >= 10_000_000_000L) value else value * 1000L
+}
+
+private fun decodeXtreamText(value: String?): String {
+    val raw = value?.trim().orEmpty()
+    if (raw.isBlank()) return ""
+    val decoded = runCatching {
+        Base64.Default.decode(raw).decodeToString().trim()
+    }.getOrNull()
+    return decoded?.takeIf { candidate ->
+        candidate.isNotBlank() &&
+            '\uFFFD' !in candidate &&
+            candidate.all { char -> char == '\n' || char == '\r' || char == '\t' || char.code >= 32 }
+    } ?: raw
 }
 
 private object LiveTvRepositoryStalker {

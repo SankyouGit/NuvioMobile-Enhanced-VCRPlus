@@ -14,7 +14,11 @@ data class LiveTvChannel(
     val headers: Map<String, String> = emptyMap(),
     val streamType: String? = null,
     val stalkerCommand: String? = null,
+    val xtreamStreamId: String? = null,
 )
+
+internal fun LiveTvChannel.epgKey(): String =
+    tvgId?.trim()?.takeIf(String::isNotBlank) ?: id
 
 data class LiveTvRecentChannel(
     val streamUrl: String,
