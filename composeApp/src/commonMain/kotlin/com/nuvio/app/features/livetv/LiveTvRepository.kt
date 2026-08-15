@@ -152,8 +152,10 @@ object LiveTvRepository {
                 channels = channels,
                 favoriteUrls = mutableUiState.value.favoriteUrls,
                 recentChannel = mutableUiState.value.recentChannel,
+                isEpgLoading = playlist.epgUrls.isNotEmpty(),
                 isLoaded = true,
             )
+            loadEpgInBackground(displayName, playlist.epgUrls)
             channels
         }.onFailure { error ->
             mutableUiState.value = mutableUiState.value.copy(
@@ -318,16 +320,21 @@ object LiveTvRepository {
     private fun loadEpgInBackground(sourceUrl: String, epgUrls: List<String>) {
         if (epgUrls.isEmpty()) return
         epgScope.launch {
-            val programmes = epgUrls
-                .mapNotNull { epgUrl ->
+            val nowEpochMs = LiveTvClock.nowEpochMs()
+            val programmesByChannel = mergeXmlTvProgrammeSchedules(
+                epgUrls.mapNotNull { epgUrl ->
                     runCatching {
-                        parseCurrentXmlTvProgrammes(httpGetText(epgUrl))
+                        parseXmlTvProgrammeSchedule(
+                            content = httpGetText(epgUrl),
+                            nowEpochMs = nowEpochMs,
+                        )
                     }.getOrNull()
-                }
-                .fold(emptyMap<String, LiveTvProgramme>()) { merged, entries -> merged + entries }
+                },
+            )
             if (mutableUiState.value.sourceUrl == sourceUrl) {
                 mutableUiState.value = mutableUiState.value.copy(
-                    currentProgrammes = programmes,
+                    programmesByChannel = programmesByChannel,
+                    currentProgrammes = currentXmlTvProgrammes(programmesByChannel, nowEpochMs),
                     isEpgLoading = false,
                 )
             }
@@ -825,55 +832,11 @@ internal expect object LiveTvClock {
     fun parseXmlTvTimestamp(value: String): Long?
 }
 
-private val xmlTvProgrammeRegex = Regex(
-    """<programme\b([^>]*)>([\s\S]*?)</programme>""",
-    RegexOption.IGNORE_CASE,
-)
-private val xmlTvTitleRegex = Regex(
-    """<title\b[^>]*>([\s\S]*?)</title>""",
-    RegexOption.IGNORE_CASE,
-)
-private val xmlAttributeRegex = Regex("""([\w-]+)="([^"]*)"""")
-
 internal fun parseCurrentXmlTvProgrammes(
     content: String,
     nowEpochMs: Long = LiveTvClock.nowEpochMs(),
-): Map<String, LiveTvProgramme> {
-    val programmes = mutableMapOf<String, LiveTvProgramme>()
-    xmlTvProgrammeRegex.findAll(content).forEach { match ->
-        val attributes = xmlAttributeRegex.findAll(match.groupValues[1])
-            .associate { attribute -> attribute.groupValues[1].lowercase() to attribute.groupValues[2] }
-        val channelId = attributes["channel"]?.trim()?.takeIf(String::isNotBlank) ?: return@forEach
-        val rawStart = attributes["start"].orEmpty()
-        val rawStop = attributes["stop"].orEmpty()
-        val startEpochMs = LiveTvClock.parseXmlTvTimestamp(rawStart) ?: return@forEach
-        val stopEpochMs = LiveTvClock.parseXmlTvTimestamp(rawStop) ?: return@forEach
-        if (nowEpochMs !in startEpochMs until stopEpochMs) return@forEach
-        val title = xmlTvTitleRegex.find(match.groupValues[2])
-            ?.groupValues
-            ?.get(1)
-            ?.decodeXmlEntities()
-            ?.trim()
-            ?.takeIf(String::isNotBlank)
-            ?: return@forEach
-        programmes[channelId] = LiveTvProgramme(
-            title = title,
-            startEpochMs = startEpochMs,
-            stopEpochMs = stopEpochMs,
-            timeLabel = "${rawStart.xmlTvTimePart()} - ${rawStop.xmlTvTimePart()}",
-        )
-    }
-    return programmes
-}
-
-private fun String.xmlTvTimePart(): String {
-    val digits = takeWhile(Char::isDigit)
-    return if (digits.length >= 12) "${digits.substring(8, 10)}:${digits.substring(10, 12)}" else ""
-}
-
-private fun String.decodeXmlEntities(): String =
-    replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
+): Map<String, LiveTvProgramme> =
+    currentXmlTvProgrammes(
+        programmesByChannel = parseXmlTvProgrammeSchedule(content, nowEpochMs),
+        nowEpochMs = nowEpochMs,
+    )
