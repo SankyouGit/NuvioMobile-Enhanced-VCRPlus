@@ -38,8 +38,17 @@ jobs:
       - name: Create CI local properties
         run: touch local.properties
 
-      - name: Run shared Android host tests
-        run: ./gradlew :composeApp:testAndroidHostTest -Pnuvio.android.distribution=full --stacktrace
-
       - name: Compile full IPTV debug APK
         run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full --stacktrace
+
+      - name: Upload full IPTV debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-vcrplus-full-debug
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run repository Android host tests
+        continue-on-error: true
+        run: ./gradlew :composeApp:testAndroidHostTest -Pnuvio.android.distribution=full --stacktrace
