@@ -1,0 +1,231 @@
+name: Xtream Selector Cleanup
+
+on:
+  push:
+    branches:
+      - feature/xtream-epg-categories
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/xtream-epg-categories
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply compact category selector
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvScreen.kt")
+          text = path.read_text()
+          fn_start = text.index("private fun LiveTvXtreamSettingsCard(")
+
+          visible_marker = """    val visibleCategories = remember(categories, categoryQuery) {
+        categories
+            .filter { category ->
+                categoryQuery.isBlank() || category.name.contains(categoryQuery, ignoreCase = true)
+            }
+            .take(12)
+    }
+"""
+          visible_replacement = visible_marker + """    var categoryPickerExpanded by rememberSaveable { mutableStateOf(false) }
+    val selectedCategoryNames = remember(categories, selectedCategoryIds) {
+        categories
+            .filter { category -> category.id in selectedCategoryIds }
+            .map(LiveTvXtreamCategory::name)
+    }
+    LaunchedEffect(categories.size) {
+        if (categories.isNotEmpty() && selectedCategoryIds.isEmpty()) {
+            categoryPickerExpanded = true
+        }
+    }
+"""
+          if visible_marker in text[fn_start:]:
+              text = text[:fn_start] + text[fn_start:].replace(visible_marker, visible_replacement, 1)
+          elif "var categoryPickerExpanded by rememberSaveable" not in text[fn_start:]:
+              raise SystemExit("Could not locate Xtream category selector state block")
+
+          start = text.index("            if (categories.isEmpty()) {", fn_start)
+          end = text.index("\n\n            if (isLoading)", start)
+          replacement = """            if (categories.isEmpty()) {
+                NuvioPrimaryButton(
+                    text = "Load categories",
+                    enabled = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !isLoading,
+                    onClick = onDiscoverCategories,
+                )
+            } else {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { categoryPickerExpanded = !categoryPickerExpanded },
+                    color = tokens.colors.surfaceCard,
+                    shape = tokens.shapes.compactCard,
+                    border = BorderStroke(NuvioTokens.Border.thin, tokens.colors.borderSubtle),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            Text(
+                                text = "Categories",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = tokens.colors.textPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = when {
+                                    selectedCategoryNames.isEmpty() -> "Choose what to load"
+                                    selectedCategoryNames.size <= 3 -> selectedCategoryNames.joinToString(" · ")
+                                    else -> selectedCategoryNames.take(3).joinToString(" · ") + "  +${selectedCategoryNames.size - 3}"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = tokens.colors.textMuted,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Text(
+                            text = if (categoryPickerExpanded) "Hide" else if (selectedCategoryIds.isEmpty()) "Choose" else "Change",
+                            modifier = Modifier.padding(start = 12.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = tokens.colors.accent,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+
+                if (categoryPickerExpanded) {
+                    NuvioInputField(
+                        value = categoryQuery,
+                        onValueChange = onCategoryQueryChange,
+                        placeholder = "Search ${categories.size} categories",
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = onSelectAllCategories,
+                        ) {
+                            Text("Select all")
+                        }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = selectedCategoryIds.isNotEmpty(),
+                            onClick = onClearCategories,
+                        ) {
+                            Text("Clear")
+                        }
+                    }
+                    visibleCategories.forEach { category ->
+                        val selected = category.id in selectedCategoryIds
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onToggleCategory(category.id) },
+                            color = if (selected) tokens.colors.overlaySelected else tokens.colors.surfaceCard,
+                            shape = tokens.shapes.compactCard,
+                            border = BorderStroke(
+                                NuvioTokens.Border.thin,
+                                if (selected) tokens.colors.accent.copy(alpha = 0.52f) else tokens.colors.borderSubtle,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = category.name,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = tokens.colors.textPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (selected) {
+                                    Text(
+                                        text = "✓",
+                                        modifier = Modifier.padding(start = 10.dp),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = tokens.colors.accent,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (categories.count {
+                            categoryQuery.isBlank() || it.name.contains(categoryQuery, ignoreCase = true)
+                        } > visibleCategories.size
+                    ) {
+                        Text(
+                            text = "Showing ${visibleCategories.size} matches. Search to narrow the list.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tokens.colors.textMuted,
+                        )
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { categoryPickerExpanded = false },
+                    ) {
+                        Text("Done · ${selectedCategoryIds.size} selected")
+                    }
+                }
+
+                NuvioPrimaryButton(
+                    text = if (selectedCategoryIds.isEmpty()) {
+                        "Choose categories"
+                    } else {
+                        "Load channels · ${selectedCategoryIds.size} categories"
+                    },
+                    enabled = selectedCategoryIds.isNotEmpty() && !isLoading,
+                    onClick = onLoad,
+                )
+            }"""
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text)
+          PY
+          git diff --check
+
+      - name: Commit selector cleanup if changed
+        shell: bash
+        run: |
+          if git diff --quiet -- composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvScreen.kt; then
+            echo "Selector cleanup already applied."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvScreen.kt
+            git commit -m "ui: simplify Xtream category selector"
+            git push origin HEAD:feature/xtream-epg-categories
+          fi
+
+      - name: Create CI local properties
+        run: touch local.properties
+
+      - name: Build side-by-side Full APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+
+      - name: Upload selector-cleanup APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-vcrplus-xtream-selector-clean-debug
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
