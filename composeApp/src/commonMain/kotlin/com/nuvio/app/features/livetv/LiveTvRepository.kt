@@ -291,9 +291,6 @@ object LiveTvRepository {
         }
 
         mutableUiState.value = mutableUiState.value.copy(
-            sourceType = LiveTvSourceType.Xtream,
-            sourceUrl = normalizedSettings.serverUrl,
-            xtreamSettings = normalizedSettings,
             isLoading = true,
             errorMessage = null,
         )
