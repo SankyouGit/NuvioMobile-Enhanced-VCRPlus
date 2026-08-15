@@ -569,21 +569,22 @@ private object LiveTvRepositoryXtream {
                     }
 
             else -> {
+                val scopedData = mutableListOf<JsonElement>()
                 var scopedRequestFailed = false
-                val scopedData = selectedCategoryIds
-                    .sorted()
-                    .flatMap { categoryId ->
-                        runCatching {
-                            request(
-                                settings = settings,
-                                action = "get_live_streams",
-                                extraParameters = mapOf("category_id" to categoryId),
-                            ).jsonArrayOrEmpty()
-                        }.getOrElse {
-                            scopedRequestFailed = true
-                            emptyList()
-                        }
+                for (categoryId in selectedCategoryIds.sorted()) {
+                    val response = runCatching {
+                        request(
+                            settings = settings,
+                            action = "get_live_streams",
+                            extraParameters = mapOf("category_id" to categoryId),
+                        )
+                    }.getOrNull()
+                    if (response !is JsonArray) {
+                        scopedRequestFailed = true
+                        break
                     }
+                    scopedData.addAll(response)
+                }
                 if (!scopedRequestFailed) {
                     scopedData
                 } else {
