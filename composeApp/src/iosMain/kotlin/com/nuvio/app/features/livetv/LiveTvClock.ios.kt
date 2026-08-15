@@ -6,6 +6,8 @@ import platform.Foundation.NSLocale
 import platform.Foundation.localeWithLocaleIdentifier
 import platform.Foundation.timeIntervalSince1970
 
+private const val COCOA_REFERENCE_DATE_EPOCH_SECONDS = 978307200.0
+
 actual object LiveTvClock {
     actual fun nowEpochMs(): Long = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
 
@@ -13,7 +15,12 @@ actual object LiveTvClock {
         NSDateFormatter().apply {
             locale = NSLocale.localeWithLocaleIdentifier("en_US_POSIX")
             dateFormat = "HH:mm"
-        }.stringFromDate(NSDate(timeIntervalSince1970 = epochMs / 1000.0))
+        }.stringFromDate(
+            NSDate(
+                timeIntervalSinceReferenceDate =
+                    (epochMs / 1000.0) - COCOA_REFERENCE_DATE_EPOCH_SECONDS,
+            ),
+        )
 
     actual fun parseXmlTvTimestamp(value: String): Long? {
         val parts = value.trim().split(Regex("\\s+"), limit = 2)
