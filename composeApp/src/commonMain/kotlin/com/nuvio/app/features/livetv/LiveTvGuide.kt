@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Tv
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -79,7 +78,7 @@ internal fun LiveTvFavoritesGuide(
     }
     val favoriteProgrammes = remember(favoriteChannels, programmesByChannel) {
         favoriteChannels.flatMap { channel ->
-            channel.tvgId?.let(programmesByChannel::get).orEmpty()
+            programmesByChannel[channel.epgKey()].orEmpty()
         }
     }
 
@@ -159,7 +158,7 @@ internal fun LiveTvFavoritesGuide(
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "${favoriteChannels.size} favorite channels",
+                    text = if (isEpgLoading) "${favoriteChannels.size} favorite channels · updating guide" else "${favoriteChannels.size} favorite channels",
                     style = MaterialTheme.typography.bodySmall,
                     color = tokens.colors.textMuted,
                 )
@@ -212,24 +211,6 @@ internal fun LiveTvFavoritesGuide(
                 )
             }
 
-            isEpgLoading && programmesByChannel.isEmpty() -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        CircularProgressIndicator(color = tokens.colors.accent)
-                        Text(
-                            text = "Loading XMLTV guide…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = tokens.colors.textMuted,
-                        )
-                    }
-                }
-            }
 
             else -> {
                 GuideGrid(
@@ -307,7 +288,7 @@ private fun GuideGrid(
                     ) {
                         GuideProgrammeRow(
                             channel = channel,
-                            programmes = channel.tvgId?.let(programmesByChannel::get).orEmpty(),
+                            programmes = programmesByChannel[channel.epgKey()].orEmpty(),
                             pageStartEpochMs = pageStartEpochMs,
                             pageEndEpochMs = pageEndEpochMs,
                             nowEpochMs = nowEpochMs,

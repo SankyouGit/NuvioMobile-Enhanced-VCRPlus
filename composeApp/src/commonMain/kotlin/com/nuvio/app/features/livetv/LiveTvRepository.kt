@@ -6,14 +6,20 @@ import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -22,6 +28,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.io.encoding.Base64
+
+private const val XTREAM_EPG_LIMIT = 96
+private const val XTREAM_EPG_MAX_CONCURRENCY = 8
+private const val XTREAM_EPG_REQUEST_TIMEOUT_MS = 10_000L
 
 object LiveTvRepository {
     private val mutableUiState = MutableStateFlow(LiveTvUiState())
@@ -32,6 +43,7 @@ object LiveTvRepository {
     private var favoriteEpgReloadJob: Job? = null
     private var activeEpgSourceUrl: String? = null
     private var activeEpgUrls: List<String> = emptyList()
+    private var activeEpgRequestHeaders: Map<String, String> = emptyMap()
 
     private var initialized = false
 
@@ -49,6 +61,13 @@ object LiveTvRepository {
     }
 
     fun onProfileChanged() {
+        favoriteEpgReloadJob?.cancel()
+        favoriteEpgReloadJob = null
+        epgJob?.cancel()
+        epgJob = null
+        activeEpgSourceUrl = null
+        activeEpgUrls = emptyList()
+        activeEpgRequestHeaders = emptyMap()
         initialized = false
         mutableUiState.value = LiveTvUiState()
         ensureLoaded()
@@ -235,6 +254,47 @@ object LiveTvRepository {
         }
     }
 
+    suspend fun discoverXtreamCategories(
+        settings: LiveTvXtreamSettings,
+    ): Result<List<LiveTvXtreamCategory>> {
+        val normalizedSettings = settings.normalized()
+        if (!normalizedSettings.isConfigured) {
+            val error = IllegalArgumentException("Server URL, username, and password are required.")
+            mutableUiState.value = mutableUiState.value.copy(errorMessage = error.message)
+            return Result.failure(error)
+        }
+        if (!normalizedSettings.serverUrl.startsWith("http://") && !normalizedSettings.serverUrl.startsWith("https://")) {
+            val error = IllegalArgumentException("Enter a valid HTTP or HTTPS Xtream server URL.")
+            mutableUiState.value = mutableUiState.value.copy(errorMessage = error.message)
+            return Result.failure(error)
+        }
+
+        mutableUiState.value = mutableUiState.value.copy(
+            isLoading = true,
+            errorMessage = null,
+        )
+
+        return runCatching {
+            val categoryMap = withContext(Dispatchers.Default) {
+                LiveTvRepositoryXtream.getLiveCategories(normalizedSettings)
+            }
+            val categories = categoryMap
+                .map { (id, name) -> LiveTvXtreamCategory(id = id, name = name) }
+                .sortedBy { it.name.lowercase() }
+            require(categories.isNotEmpty()) { "No live categories were found for this Xtream provider." }
+            mutableUiState.value = mutableUiState.value.copy(
+                isLoading = false,
+                errorMessage = null,
+            )
+            categories
+        }.onFailure { error ->
+            mutableUiState.value = mutableUiState.value.copy(
+                isLoading = false,
+                errorMessage = error.message ?: "Xtream categories could not be loaded.",
+            )
+        }
+    }
+
     suspend fun loadXtream(settings: LiveTvXtreamSettings): Result<List<LiveTvChannel>> {
         val normalizedSettings = settings.normalized()
         if (!normalizedSettings.isConfigured) {
@@ -249,35 +309,50 @@ object LiveTvRepository {
         }
 
         mutableUiState.value = mutableUiState.value.copy(
-            sourceType = LiveTvSourceType.Xtream,
-            sourceUrl = normalizedSettings.serverUrl,
-            xtreamSettings = normalizedSettings,
             isLoading = true,
             errorMessage = null,
         )
 
         return runCatching {
-            val channels = withContext(Dispatchers.Default) {
-                fetchXtreamChannels(normalizedSettings)
+            val categoryMap = withContext(Dispatchers.Default) {
+                LiveTvRepositoryXtream.getLiveCategories(normalizedSettings)
             }
-            require(channels.isNotEmpty()) { "No playable channels were found for this Xtream provider." }
+            val requestedCategoryIds = normalizedSettings.selectedCategoryIds
+            val validCategoryIds = requestedCategoryIds.intersect(categoryMap.keys)
+            if (requestedCategoryIds.isNotEmpty()) {
+                require(validCategoryIds.isNotEmpty()) {
+                    "Your selected Xtream categories are no longer available. Reload categories and choose again."
+                }
+            }
+            val effectiveSettings = normalizedSettings.copy(selectedCategoryIds = validCategoryIds)
+            val channels = withContext(Dispatchers.Default) {
+                fetchXtreamChannels(effectiveSettings, categoryMap)
+            }
+            require(channels.isNotEmpty()) { "No playable channels were found for the selected Xtream categories." }
             LiveTvStorage.saveLocalPlaylistData("")
             LiveTvStorage.saveSourceType(LiveTvSourceType.Xtream)
-            LiveTvStorage.saveXtreamSettings(normalizedSettings)
+            LiveTvStorage.saveXtreamSettings(effectiveSettings)
+            val favoriteUrls = mutableUiState.value.favoriteUrls
+            val hasFavoriteXtreamChannels = channels.any { channel ->
+                channel.streamUrl in favoriteUrls && !channel.xtreamStreamId.isNullOrBlank()
+            }
             mutableUiState.value = LiveTvUiState(
                 sourceType = LiveTvSourceType.Xtream,
-                sourceUrl = normalizedSettings.serverUrl,
+                sourceUrl = effectiveSettings.serverUrl,
                 stalkerSettings = mutableUiState.value.stalkerSettings,
-                xtreamSettings = normalizedSettings,
+                xtreamSettings = effectiveSettings,
                 channels = channels,
-                favoriteUrls = mutableUiState.value.favoriteUrls,
+                favoriteUrls = favoriteUrls,
                 recentChannel = mutableUiState.value.recentChannel,
+                isEpgLoading = hasFavoriteXtreamChannels,
                 isLoaded = true,
             )
+            loadXtreamFavoriteEpgInBackground(effectiveSettings)
             channels
         }.onFailure { error ->
             mutableUiState.value = mutableUiState.value.copy(
                 isLoading = false,
+                isEpgLoading = false,
                 isLoaded = mutableUiState.value.channels.isNotEmpty(),
                 errorMessage = error.message ?: "Xtream provider could not be loaded.",
             )
@@ -339,6 +414,18 @@ object LiveTvRepository {
             programmesByChannel = retainedProgrammes,
         )
 
+        if (state.sourceType == LiveTvSourceType.Xtream && state.xtreamSettings.isConfigured) {
+            favoriteEpgReloadJob?.cancel()
+            favoriteEpgReloadJob = epgScope.launch {
+                delay(250L)
+                val latestState = mutableUiState.value
+                if (latestState.sourceType == LiveTvSourceType.Xtream && latestState.xtreamSettings.isConfigured) {
+                    loadXtreamFavoriteEpgInBackground(latestState.xtreamSettings)
+                }
+            }
+            return
+        }
+
         if (
             !channel.tvgId.isNullOrBlank() &&
             activeEpgUrls.isNotEmpty() &&
@@ -353,7 +440,11 @@ object LiveTvRepository {
                     activeEpgSourceUrl == latestState.sourceUrl
                 ) {
                     mutableUiState.value = latestState.copy(isEpgLoading = true)
-                    loadEpgInBackground(latestState.sourceUrl, activeEpgUrls)
+                    loadEpgInBackground(
+                        sourceUrl = latestState.sourceUrl,
+                        epgUrls = activeEpgUrls,
+                        requestHeaders = activeEpgRequestHeaders,
+                    )
                 }
             }
         }
@@ -371,11 +462,89 @@ object LiveTvRepository {
         mutableUiState.value = mutableUiState.value.copy(recentChannel = recentChannel)
     }
 
-    private fun loadEpgInBackground(sourceUrl: String, epgUrls: List<String>) {
+    private fun loadXtreamFavoriteEpgInBackground(settings: LiveTvXtreamSettings) {
+        activeEpgSourceUrl = null
+        activeEpgUrls = emptyList()
+        activeEpgRequestHeaders = emptyMap()
+        epgJob?.cancel()
+
+        val state = mutableUiState.value
+        if (state.sourceType != LiveTvSourceType.Xtream || state.xtreamSettings != settings) {
+            return
+        }
+        val favoriteChannels = state.channels.filter { channel ->
+            channel.streamUrl in state.favoriteUrls && !channel.xtreamStreamId.isNullOrBlank()
+        }
+        if (favoriteChannels.isEmpty()) {
+            mutableUiState.value = state.copy(
+                programmesByChannel = emptyMap(),
+                currentProgrammes = emptyMap(),
+                isEpgLoading = false,
+            )
+            return
+        }
+
+        val sourceUrl = state.sourceUrl
+        mutableUiState.value = state.copy(isEpgLoading = true)
+        epgJob = epgScope.launch {
+            val nowEpochMs = LiveTvClock.nowEpochMs()
+            val semaphore = Semaphore(XTREAM_EPG_MAX_CONCURRENCY)
+            val schedules = coroutineScope {
+                favoriteChannels.map { channel ->
+                    async {
+                        semaphore.withPermit {
+                            val programmes = withTimeoutOrNull(XTREAM_EPG_REQUEST_TIMEOUT_MS) {
+                                runCatching {
+                                    LiveTvRepositoryXtream.getFavoriteEpg(
+                                        settings = settings,
+                                        streamId = channel.xtreamStreamId.orEmpty(),
+                                        nowEpochMs = nowEpochMs,
+                                    )
+                                }.getOrDefault(emptyList())
+                            }.orEmpty()
+                            channel.epgKey() to programmes
+                        }
+                    }
+                }.awaitAll().toMap()
+            }
+            if (!isActive) return@launch
+
+            val latestState = mutableUiState.value
+            if (
+                latestState.sourceType == LiveTvSourceType.Xtream &&
+                latestState.sourceUrl == sourceUrl &&
+                latestState.xtreamSettings == settings
+            ) {
+                val favoriteKeys = latestState.channels
+                    .asSequence()
+                    .filter { channel -> channel.streamUrl in latestState.favoriteUrls }
+                    .map(LiveTvChannel::epgKey)
+                    .toSet()
+                val filteredSchedules = schedules
+                    .filterKeys { key -> key in favoriteKeys }
+                    .filterValues(List<LiveTvProgramme>::isNotEmpty)
+                mutableUiState.value = latestState.copy(
+                    programmesByChannel = filteredSchedules,
+                    currentProgrammes = currentXmlTvProgrammes(filteredSchedules, nowEpochMs),
+                    isEpgLoading = false,
+                )
+            }
+        }
+    }
+
+    private fun loadEpgInBackground(
+        sourceUrl: String,
+        epgUrls: List<String>,
+        requestHeaders: Map<String, String> = emptyMap(),
+    ) {
         activeEpgSourceUrl = sourceUrl
         activeEpgUrls = epgUrls
+        activeEpgRequestHeaders = requestHeaders
         epgJob?.cancel()
-        if (epgUrls.isEmpty()) return
+        if (epgUrls.isEmpty()) {
+            mutableUiState.value = mutableUiState.value.copy(isEpgLoading = false)
+            return
+        }
         epgJob = epgScope.launch {
             epgMutex.lock()
             try {
@@ -384,8 +553,13 @@ object LiveTvRepository {
                 val programmesByChannel = mergeXmlTvProgrammeSchedules(
                     epgUrls.mapNotNull { epgUrl ->
                         runCatching {
+                            val content = if (requestHeaders.isEmpty()) {
+                                httpGetText(epgUrl)
+                            } else {
+                                httpGetTextWithHeaders(epgUrl, requestHeaders)
+                            }
                             parseXmlTvProgrammeSchedule(
-                                content = httpGetText(epgUrl),
+                                content = content,
                                 nowEpochMs = nowEpochMs,
                             )
                         }.getOrNull()
@@ -446,12 +620,20 @@ private suspend fun resolveStalkerPlaybackChannel(channel: LiveTvChannel): LiveT
     )
 }
 
-private suspend fun fetchXtreamChannels(settings: LiveTvXtreamSettings): List<LiveTvChannel> {
-    val categories = LiveTvRepositoryXtream.getLiveCategories(settings)
-    return LiveTvRepositoryXtream.getLiveStreams(settings, categories)
+private suspend fun fetchXtreamChannels(
+    settings: LiveTvXtreamSettings,
+    categories: Map<String, String>? = null,
+): List<LiveTvChannel> {
+    val categoryMap = categories ?: LiveTvRepositoryXtream.getLiveCategories(settings)
+    return LiveTvRepositoryXtream.getLiveStreams(
+        settings = settings,
+        categories = categoryMap,
+        selectedCategoryIds = settings.selectedCategoryIds.intersect(categoryMap.keys),
+    )
 }
 
 private object LiveTvRepositoryXtream {
+    private const val MAX_SCOPED_CATEGORY_REQUESTS = 24
     suspend fun getLiveCategories(settings: LiveTvXtreamSettings): Map<String, String> {
         val data = request(settings, action = "get_live_categories").jsonArrayOrEmpty()
         return data.associateNotNull { element ->
@@ -465,12 +647,62 @@ private object LiveTvRepositoryXtream {
     suspend fun getLiveStreams(
         settings: LiveTvXtreamSettings,
         categories: Map<String, String>,
+        selectedCategoryIds: Set<String> = emptySet(),
     ): List<LiveTvChannel> {
-        val data = request(settings, action = "get_live_streams").jsonArrayOrEmpty()
+        val useUnscopedFilteredRequest = selectedCategoryIds.isNotEmpty() && (
+            selectedCategoryIds.size == categories.size ||
+                selectedCategoryIds.size > MAX_SCOPED_CATEGORY_REQUESTS
+            )
+        val data = when {
+            selectedCategoryIds.isEmpty() ->
+                request(settings, action = "get_live_streams").jsonArrayOrEmpty()
+
+            useUnscopedFilteredRequest ->
+                request(settings, action = "get_live_streams")
+                    .jsonArrayOrEmpty()
+                    .filter { element ->
+                        val obj = element as? JsonObject
+                        obj?.stringValue("category_id") in selectedCategoryIds
+                    }
+
+            else -> {
+                val scopedData = mutableListOf<JsonElement>()
+                var scopedRequestFailed = false
+                for (categoryId in selectedCategoryIds.sorted()) {
+                    val response = runCatching {
+                        request(
+                            settings = settings,
+                            action = "get_live_streams",
+                            extraParameters = mapOf("category_id" to categoryId),
+                        )
+                    }.getOrNull()
+                    if (response !is JsonArray) {
+                        scopedRequestFailed = true
+                        break
+                    }
+                    scopedData.addAll(response)
+                }
+                if (!scopedRequestFailed) {
+                    scopedData
+                } else {
+                    request(settings, action = "get_live_streams")
+                        .jsonArrayOrEmpty()
+                        .filter { element ->
+                            val obj = element as? JsonObject
+                            obj?.stringValue("category_id") in selectedCategoryIds
+                        }
+                }
+            }
+        }
+
         return data.mapIndexedNotNull { index, element ->
             val obj = element as? JsonObject ?: return@mapIndexedNotNull null
             val name = obj.stringValue("name") ?: return@mapIndexedNotNull null
             val streamId = obj.stringValue("stream_id") ?: obj.stringValue("id") ?: return@mapIndexedNotNull null
+            val categoryId = obj.stringValue("category_id")
+            if (selectedCategoryIds.isNotEmpty() && categoryId !in selectedCategoryIds) {
+                return@mapIndexedNotNull null
+            }
             val directSource = obj.stringValue("direct_source")
                 ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
             val extension = obj.stringValue("container_extension")
@@ -479,7 +711,6 @@ private object LiveTvRepositoryXtream {
                 ?.takeIf(String::isNotBlank)
                 ?: "ts"
             val streamUrl = directSource ?: settings.liveStreamUrl(streamId, extension)
-            val categoryId = obj.stringValue("category_id")
             LiveTvChannel(
                 id = "xtream-$streamId-$index",
                 name = name,
@@ -488,15 +719,53 @@ private object LiveTvRepositoryXtream {
                 logoUrl = obj.stringValue("stream_icon") ?: obj.stringValue("logo"),
                 group = categoryId?.let(categories::get).orEmpty(),
                 headers = M3U_STREAM_REQUEST_HEADERS,
+                xtreamStreamId = streamId,
             )
         }.distinctBy { it.streamUrl }
     }
 
-    private suspend fun request(settings: LiveTvXtreamSettings, action: String): JsonElement {
+    suspend fun getFavoriteEpg(
+        settings: LiveTvXtreamSettings,
+        streamId: String,
+        nowEpochMs: Long,
+    ): List<LiveTvProgramme> {
+        if (streamId.isBlank()) return emptyList()
+        val parameters = mapOf(
+            "stream_id" to streamId,
+            "limit" to XTREAM_EPG_LIMIT.toString(),
+        )
+        val shortEpg = runCatching {
+            request(
+                settings = settings,
+                action = "get_short_epg",
+                extraParameters = parameters,
+            )
+        }.getOrNull()?.let { response ->
+            parseXtreamEpgListings(response, nowEpochMs)
+        }.orEmpty()
+        if (shortEpg.isNotEmpty()) return shortEpg
+
+        return runCatching {
+            request(
+                settings = settings,
+                action = "get_simple_data_table",
+                extraParameters = mapOf("stream_id" to streamId),
+            )
+        }.getOrNull()?.let { response ->
+            parseXtreamEpgListings(response, nowEpochMs)
+        }.orEmpty()
+    }
+
+    private suspend fun request(
+        settings: LiveTvXtreamSettings,
+        action: String,
+        extraParameters: Map<String, String> = emptyMap(),
+    ): JsonElement {
         val parameters = buildMap {
             put("username", settings.username)
             put("password", settings.password)
             put("action", action)
+            putAll(extraParameters)
         }
         val url = settings.playerApiEndpoint() + parameters.entries.joinToString(
             separator = "&",
@@ -506,6 +775,45 @@ private object LiveTvRepositoryXtream {
         }
         return stalkerJson.parseToJsonElement(httpGetTextWithHeaders(url, M3U_PLAYLIST_REQUEST_HEADERS))
     }
+}
+
+internal fun parseXtreamEpgListings(
+    data: JsonElement,
+    nowEpochMs: Long = LiveTvClock.nowEpochMs(),
+): List<LiveTvProgramme> {
+    val listings = (data as? JsonObject)?.arrayValue("epg_listings").orEmpty()
+    return listings.mapNotNull { element ->
+        val obj = element as? JsonObject ?: return@mapNotNull null
+        val startEpochMs = obj.stringValue("start_timestamp").toXtreamEpochMs() ?: return@mapNotNull null
+        val stopEpochMs = obj.stringValue("stop_timestamp").toXtreamEpochMs() ?: return@mapNotNull null
+        if (stopEpochMs <= startEpochMs || stopEpochMs <= nowEpochMs) return@mapNotNull null
+        val title = decodeXtreamText(obj.stringValue("title")).ifBlank { "Untitled" }
+        LiveTvProgramme(
+            title = title,
+            startEpochMs = startEpochMs,
+            stopEpochMs = stopEpochMs,
+            timeLabel = "${LiveTvClock.formatLocalTime(startEpochMs)} – ${LiveTvClock.formatLocalTime(stopEpochMs)}",
+        )
+    }.sortedBy(LiveTvProgramme::startEpochMs)
+        .distinctBy { programme -> Triple(programme.startEpochMs, programme.stopEpochMs, programme.title) }
+}
+
+private fun String?.toXtreamEpochMs(): Long? {
+    val value = this?.trim()?.toLongOrNull() ?: return null
+    return if (value >= 10_000_000_000L) value else value * 1000L
+}
+
+private fun decodeXtreamText(value: String?): String {
+    val raw = value?.trim().orEmpty()
+    if (raw.isBlank()) return ""
+    val decoded = runCatching {
+        Base64.Default.decode(raw).decodeToString().trim()
+    }.getOrNull()
+    return decoded?.takeIf { candidate ->
+        candidate.isNotBlank() &&
+            '\uFFFD' !in candidate &&
+            candidate.all { char -> char == '\n' || char == '\r' || char == '\t' || char.code >= 32 }
+    } ?: raw
 }
 
 private object LiveTvRepositoryStalker {
@@ -656,10 +964,16 @@ private fun LiveTvXtreamSettings.normalized(): LiveTvXtreamSettings =
         serverUrl = serverUrl.trim().trimEnd('/').substringBefore("/player_api.php").trimEnd('/'),
         username = username.trim(),
         password = password.trim(),
+        selectedCategoryIds = selectedCategoryIds.map(String::trim).filter(String::isNotBlank).toSet(),
     )
 
 private fun LiveTvXtreamSettings.playerApiEndpoint(): String =
     "${serverUrl.trim().trimEnd('/')}/player_api.php"
+
+internal fun LiveTvXtreamSettings.xmlTvEndpoint(): String {
+    val baseUrl = serverUrl.trim().trimEnd('/').substringBefore("/player_api.php").trimEnd('/')
+    return "$baseUrl/xmltv.php?username=${username.trim().encodeURLParameter()}&password=${password.trim().encodeURLParameter()}"
+}
 
 private fun LiveTvXtreamSettings.liveStreamUrl(streamId: String, extension: String): String =
     buildString {

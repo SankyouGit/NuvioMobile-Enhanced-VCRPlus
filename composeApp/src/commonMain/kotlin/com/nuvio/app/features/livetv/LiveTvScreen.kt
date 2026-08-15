@@ -120,6 +120,9 @@ fun LiveTvScreen(
     var xtreamServerUrl by rememberSaveable { mutableStateOf(uiState.xtreamSettings.serverUrl) }
     var xtreamUsername by rememberSaveable { mutableStateOf(uiState.xtreamSettings.username) }
     var xtreamPassword by rememberSaveable { mutableStateOf(uiState.xtreamSettings.password) }
+    var xtreamCategories by remember { mutableStateOf<List<LiveTvXtreamCategory>>(emptyList()) }
+    var xtreamSelectedCategoryIds by remember { mutableStateOf(uiState.xtreamSettings.selectedCategoryIds) }
+    var xtreamCategoryQuery by rememberSaveable { mutableStateOf("") }
     var fileImportError by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(uiState.sourceUrl) {
@@ -135,6 +138,9 @@ fun LiveTvScreen(
         if (xtreamServerUrl.isBlank()) xtreamServerUrl = uiState.xtreamSettings.serverUrl
         if (xtreamUsername.isBlank()) xtreamUsername = uiState.xtreamSettings.username
         if (xtreamPassword.isBlank()) xtreamPassword = uiState.xtreamSettings.password
+        if (xtreamSelectedCategoryIds.isEmpty() && uiState.xtreamSettings.selectedCategoryIds.isNotEmpty()) {
+            xtreamSelectedCategoryIds = uiState.xtreamSettings.selectedCategoryIds
+        }
     }
     LaunchedEffect(Unit) {
         if (uiState.channels.isEmpty() && !uiState.isLoading) {
@@ -232,12 +238,30 @@ fun LiveTvScreen(
         }
         Unit
     }
+    val discoverXtreamCategories: () -> Unit = {
+        scope.launch {
+            val settings = LiveTvXtreamSettings(
+                serverUrl = xtreamServerUrl,
+                username = xtreamUsername,
+                password = xtreamPassword,
+                selectedCategoryIds = xtreamSelectedCategoryIds,
+            )
+            LiveTvRepository.discoverXtreamCategories(settings)
+                .onSuccess { categories ->
+                    xtreamCategories = categories
+                    val validIds = categories.map(LiveTvXtreamCategory::id).toSet()
+                    xtreamSelectedCategoryIds = xtreamSelectedCategoryIds.intersect(validIds)
+                }
+        }
+        Unit
+    }
     val loadXtreamSource: () -> Unit = {
         scope.launch {
             val settings = LiveTvXtreamSettings(
                 serverUrl = xtreamServerUrl,
                 username = xtreamUsername,
                 password = xtreamPassword,
+                selectedCategoryIds = xtreamSelectedCategoryIds,
             )
             if (LiveTvRepository.loadXtream(settings).isSuccess) {
                 showingAdvancedSettings = false
@@ -307,12 +331,40 @@ fun LiveTvScreen(
                     serverUrl = xtreamServerUrl,
                     username = xtreamUsername,
                     password = xtreamPassword,
+                    categories = xtreamCategories,
+                    selectedCategoryIds = xtreamSelectedCategoryIds,
+                    categoryQuery = xtreamCategoryQuery,
                     isLoading = uiState.isLoading,
                     errorMessage = uiState.errorMessage,
                     hasConnectedSource = uiState.sourceType == LiveTvSourceType.Xtream && uiState.channels.isNotEmpty(),
-                    onServerUrlChange = { xtreamServerUrl = it },
-                    onUsernameChange = { xtreamUsername = it },
-                    onPasswordChange = { xtreamPassword = it },
+                    onServerUrlChange = {
+                        xtreamServerUrl = it
+                        xtreamCategories = emptyList()
+                        xtreamSelectedCategoryIds = emptySet()
+                    },
+                    onUsernameChange = {
+                        xtreamUsername = it
+                        xtreamCategories = emptyList()
+                        xtreamSelectedCategoryIds = emptySet()
+                    },
+                    onPasswordChange = {
+                        xtreamPassword = it
+                        xtreamCategories = emptyList()
+                        xtreamSelectedCategoryIds = emptySet()
+                    },
+                    onCategoryQueryChange = { xtreamCategoryQuery = it },
+                    onDiscoverCategories = discoverXtreamCategories,
+                    onToggleCategory = { categoryId ->
+                        xtreamSelectedCategoryIds = if (categoryId in xtreamSelectedCategoryIds) {
+                            xtreamSelectedCategoryIds - categoryId
+                        } else {
+                            xtreamSelectedCategoryIds + categoryId
+                        }
+                    },
+                    onSelectAllCategories = {
+                        xtreamSelectedCategoryIds = xtreamCategories.map(LiveTvXtreamCategory::id).toSet()
+                    },
+                    onClearCategories = { xtreamSelectedCategoryIds = emptySet() },
                     onLoad = loadXtreamSource,
                     onDisconnect = {
                         LiveTvRepository.disconnect()
@@ -841,16 +893,37 @@ private fun LiveTvXtreamSettingsCard(
     serverUrl: String,
     username: String,
     password: String,
+    categories: List<LiveTvXtreamCategory>,
+    selectedCategoryIds: Set<String>,
+    categoryQuery: String,
     isLoading: Boolean,
     errorMessage: String?,
     hasConnectedSource: Boolean,
     onServerUrlChange: (String) -> Unit,
     onUsernameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
+    onCategoryQueryChange: (String) -> Unit,
+    onDiscoverCategories: () -> Unit,
+    onToggleCategory: (String) -> Unit,
+    onSelectAllCategories: () -> Unit,
+    onClearCategories: () -> Unit,
     onLoad: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val tokens = MaterialTheme.nuvio
+    val visibleCategories = remember(categories, categoryQuery) {
+        categories
+            .filter { category ->
+                categoryQuery.isBlank() || category.name.contains(categoryQuery, ignoreCase = true)
+            }
+            .take(12)
+    }
+    var categoryPickerExpanded by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(categories.size) {
+        if (categories.isNotEmpty() && selectedCategoryIds.isEmpty()) {
+            categoryPickerExpanded = true
+        }
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = tokens.colors.surface,
@@ -878,9 +951,7 @@ private fun LiveTvXtreamSettingsCard(
                         tint = tokens.colors.accent,
                     )
                 }
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
                         text = stringResource(Res.string.live_tv_source_xtream),
                         style = MaterialTheme.typography.titleMedium,
@@ -888,7 +959,7 @@ private fun LiveTvXtreamSettingsCard(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        text = stringResource(Res.string.live_tv_xtream_settings_description),
+                        text = "Choose categories before loading channels. EPG is pulled automatically from Xtream.",
                         style = MaterialTheme.typography.bodySmall,
                         color = tokens.colors.textMuted,
                     )
@@ -923,11 +994,136 @@ private fun LiveTvXtreamSettingsCard(
                     color = tokens.colors.danger,
                 )
             }
-            NuvioPrimaryButton(
-                text = stringResource(Res.string.live_tv_load),
-                enabled = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !isLoading,
-                onClick = onLoad,
-            )
+
+            if (categories.isEmpty()) {
+                NuvioPrimaryButton(
+                    text = "Load categories",
+                    enabled = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !isLoading,
+                    onClick = onDiscoverCategories,
+                )
+            } else {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { categoryPickerExpanded = !categoryPickerExpanded },
+                    color = tokens.colors.surfaceCard,
+                    shape = tokens.shapes.compactCard,
+                    border = BorderStroke(NuvioTokens.Border.thin, tokens.colors.borderSubtle),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                text = "Categories",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = tokens.colors.textPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "${selectedCategoryIds.size} of ${categories.size} selected",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = tokens.colors.textMuted,
+                            )
+                        }
+                        Text(
+                            text = if (categoryPickerExpanded) "Hide" else if (selectedCategoryIds.isEmpty()) "Choose" else "Change",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = tokens.colors.accent,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+
+                if (categoryPickerExpanded) {
+                    NuvioInputField(
+                        value = categoryQuery,
+                        onValueChange = onCategoryQueryChange,
+                        placeholder = "Search ${categories.size} categories",
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = onSelectAllCategories,
+                        ) {
+                            Text("Select all")
+                        }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = selectedCategoryIds.isNotEmpty(),
+                            onClick = onClearCategories,
+                        ) {
+                            Text("Clear")
+                        }
+                    }
+                    visibleCategories.forEach { category ->
+                        val selected = category.id in selectedCategoryIds
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onToggleCategory(category.id) },
+                            color = if (selected) tokens.colors.overlaySelected else tokens.colors.surfaceCard,
+                            shape = tokens.shapes.compactCard,
+                            border = BorderStroke(
+                                NuvioTokens.Border.thin,
+                                if (selected) tokens.colors.accent.copy(alpha = 0.52f) else tokens.colors.borderSubtle,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = category.name,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = tokens.colors.textPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (selected) {
+                                    Text(
+                                        text = "✓",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = tokens.colors.accent,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (categories.count {
+                            categoryQuery.isBlank() || it.name.contains(categoryQuery, ignoreCase = true)
+                        } > visibleCategories.size
+                    ) {
+                        Text(
+                            text = "Showing ${visibleCategories.size} matches. Search to narrow the list.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tokens.colors.textMuted,
+                        )
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { categoryPickerExpanded = false },
+                    ) {
+                        Text("Done · ${selectedCategoryIds.size} selected")
+                    }
+                }
+
+                NuvioPrimaryButton(
+                    text = if (selectedCategoryIds.isEmpty()) {
+                        "Choose categories"
+                    } else {
+                        "Load channels · ${selectedCategoryIds.size} categories"
+                    },
+                    enabled = selectedCategoryIds.isNotEmpty() && !isLoading,
+                    onClick = onLoad,
+                )
+            }
+
             if (isLoading) {
                 CircularProgressIndicator(
                     modifier = Modifier

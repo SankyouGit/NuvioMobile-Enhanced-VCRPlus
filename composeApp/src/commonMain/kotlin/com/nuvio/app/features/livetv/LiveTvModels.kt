@@ -14,7 +14,11 @@ data class LiveTvChannel(
     val headers: Map<String, String> = emptyMap(),
     val streamType: String? = null,
     val stalkerCommand: String? = null,
+    val xtreamStreamId: String? = null,
 )
+
+internal fun LiveTvChannel.epgKey(): String =
+    tvgId?.trim()?.takeIf(String::isNotBlank) ?: id
 
 data class LiveTvRecentChannel(
     val streamUrl: String,
@@ -29,6 +33,11 @@ data class LiveTvProgramme(
     val startEpochMs: Long,
     val stopEpochMs: Long,
     val timeLabel: String,
+)
+
+data class LiveTvXtreamCategory(
+    val id: String,
+    val name: String,
 )
 
 data class LiveTvUiState(
@@ -67,6 +76,7 @@ data class LiveTvXtreamSettings(
     val serverUrl: String = "",
     val username: String = "",
     val password: String = "",
+    val selectedCategoryIds: Set<String> = emptySet(),
 ) {
     val isConfigured: Boolean
         get() = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank()
