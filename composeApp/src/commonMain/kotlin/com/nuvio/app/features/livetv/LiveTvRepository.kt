@@ -26,6 +26,8 @@ object LiveTvRepository {
     val uiState = mutableUiState.asStateFlow()
     private val epgScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var epgJob: Job? = null
+    private var activeEpgSourceUrl: String? = null
+    private var activeEpgUrls: List<String> = emptyList()
 
     private var initialized = false
 
@@ -300,12 +302,48 @@ object LiveTvRepository {
     }
 
     fun toggleFavorite(channel: LiveTvChannel) {
-        val favorites = mutableUiState.value.favoriteUrls.toMutableSet()
-        if (!favorites.add(channel.streamUrl)) {
+        val state = mutableUiState.value
+        val favorites = state.favoriteUrls.toMutableSet()
+        val wasAdded = favorites.add(channel.streamUrl)
+        if (!wasAdded) {
             favorites.remove(channel.streamUrl)
         }
         LiveTvStorage.saveFavoriteUrls(favorites)
-        mutableUiState.value = mutableUiState.value.copy(favoriteUrls = favorites)
+
+        val nowEpochMs = LiveTvClock.nowEpochMs()
+        val favoriteTvgIds = state.channels
+            .asSequence()
+            .filter { candidate -> candidate.streamUrl in favorites }
+            .mapNotNull(LiveTvChannel::tvgId)
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .toSet()
+        val retainedProgrammes = state.programmesByChannel
+            .mapValues { (channelId, programmes) ->
+                if (channelId in favoriteTvgIds) {
+                    programmes
+                } else {
+                    programmes.filter { programme ->
+                        nowEpochMs in programme.startEpochMs until programme.stopEpochMs
+                    }
+                }
+            }
+            .filterValues(List<LiveTvProgramme>::isNotEmpty)
+
+        mutableUiState.value = state.copy(
+            favoriteUrls = favorites,
+            programmesByChannel = retainedProgrammes,
+        )
+
+        if (
+            wasAdded &&
+            !channel.tvgId.isNullOrBlank() &&
+            activeEpgUrls.isNotEmpty() &&
+            activeEpgSourceUrl == state.sourceUrl
+        ) {
+            mutableUiState.value = mutableUiState.value.copy(isEpgLoading = true)
+            loadEpgInBackground(state.sourceUrl, activeEpgUrls)
+        }
     }
 
     fun recordRecentChannel(channel: LiveTvChannel) {
@@ -321,6 +359,8 @@ object LiveTvRepository {
     }
 
     private fun loadEpgInBackground(sourceUrl: String, epgUrls: List<String>) {
+        activeEpgSourceUrl = sourceUrl
+        activeEpgUrls = epgUrls
         epgJob?.cancel()
         if (epgUrls.isEmpty()) return
         epgJob = epgScope.launch {

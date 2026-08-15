@@ -85,7 +85,7 @@ internal fun LiveTvFavoritesGuide(
 
     var nowEpochMs by remember { mutableStateOf(LiveTvClock.nowEpochMs()) }
     var pageOffset by remember { mutableStateOf(0) }
-    var basePageStartEpochMs by remember(nowEpochMs) {
+    var basePageStartEpochMs by remember {
         mutableStateOf(nowEpochMs.floorToGuideHour())
     }
     val horizontalScroll = rememberScrollState()
