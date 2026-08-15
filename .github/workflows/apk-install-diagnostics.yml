@@ -1,0 +1,43 @@
+name: APK Install Diagnostics
+
+on:
+  push:
+    branches:
+      - ci/apk-install-diagnostics
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Create CI local properties
+        run: touch local.properties
+      - name: Build side-by-side APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+      - name: Inspect APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK=$(find androidApp/build/outputs/apk/full/debug -name '*.apk' -type f | head -1)
+          echo "APK=$APK"
+          ls -lh "$APK"
+          sha256sum "$APK"
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          echo "BUILD_TOOLS=$BUILD_TOOLS"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          "$BUILD_TOOLS/aapt" dump badging "$APK"
+          "$BUILD_TOOLS/aapt" dump permissions "$APK"
+          if command -v apkanalyzer >/dev/null 2>&1; then
+            apkanalyzer manifest application-id "$APK" || true
+            apkanalyzer manifest min-sdk "$APK" || true
+            apkanalyzer manifest target-sdk "$APK" || true
+          fi
