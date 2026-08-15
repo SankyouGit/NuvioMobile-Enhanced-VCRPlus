@@ -874,6 +874,7 @@ internal fun isLikelyCategoryHeading(name: String): Boolean {
 
 internal expect object LiveTvClock {
     fun nowEpochMs(): Long
+    fun formatLocalTime(epochMs: Long): String
     fun parseXmlTvTimestamp(value: String): Long?
 }
 

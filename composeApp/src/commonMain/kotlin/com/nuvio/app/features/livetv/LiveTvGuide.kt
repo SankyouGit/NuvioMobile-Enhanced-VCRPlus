@@ -93,9 +93,6 @@ internal fun LiveTvFavoritesGuide(
     val latestProgrammeStopEpochMs = remember(favoriteProgrammes, nowEpochMs) {
         favoriteProgrammes.maxOfOrNull(LiveTvProgramme::stopEpochMs) ?: nowEpochMs
     }
-    val referenceProgramme = remember(favoriteProgrammes) {
-        favoriteProgrammes.minByOrNull(LiveTvProgramme::startEpochMs)
-    }
     val maxPageOffset = remember(latestProgrammeStopEpochMs, basePageStartEpochMs) {
         if (latestProgrammeStopEpochMs <= basePageStartEpochMs) {
             0
@@ -241,7 +238,6 @@ internal fun LiveTvFavoritesGuide(
                     pageStartEpochMs = pageStartEpochMs,
                     pageEndEpochMs = pageEndEpochMs,
                     nowEpochMs = nowEpochMs,
-                    referenceProgramme = referenceProgramme,
                     horizontalScroll = horizontalScroll,
                     onChannelClick = onChannelClick,
                     modifier = Modifier
@@ -260,7 +256,6 @@ private fun GuideGrid(
     pageStartEpochMs: Long,
     pageEndEpochMs: Long,
     nowEpochMs: Long,
-    referenceProgramme: LiveTvProgramme?,
     horizontalScroll: androidx.compose.foundation.ScrollState,
     onChannelClick: (LiveTvChannel) -> Unit,
     modifier: Modifier = Modifier,
@@ -281,7 +276,6 @@ private fun GuideGrid(
             ) {
                 GuideTimeHeader(
                     pageStartEpochMs = pageStartEpochMs,
-                    referenceProgramme = referenceProgramme,
                 )
             }
         }
@@ -444,7 +438,6 @@ private fun GuideChannelCell(
 @Composable
 private fun GuideTimeHeader(
     pageStartEpochMs: Long,
-    referenceProgramme: LiveTvProgramme?,
 ) {
     val tokens = MaterialTheme.nuvio
     Box(
@@ -467,9 +460,8 @@ private fun GuideTimeHeader(
                         .background(tokens.colors.borderSubtle),
                 )
                 Text(
-                    text = guideClockLabel(
-                        epochMs = pageStartEpochMs + (hourIndex * GUIDE_HOUR_MS),
-                        referenceProgramme = referenceProgramme,
+                    text = LiveTvClock.formatLocalTime(
+                        pageStartEpochMs + (hourIndex * GUIDE_HOUR_MS),
                     ),
                     modifier = Modifier.padding(start = 8.dp, top = 12.dp),
                     style = MaterialTheme.typography.labelMedium,
@@ -555,7 +547,8 @@ private fun GuideProgrammeRow(
                     )
                     if (width >= 90.dp) {
                         Text(
-                            text = programme.timeLabel,
+                            text = "${LiveTvClock.formatLocalTime(programme.startEpochMs)} - " +
+                                LiveTvClock.formatLocalTime(programme.stopEpochMs),
                             style = MaterialTheme.typography.labelSmall,
                             color = if (isCurrent) tokens.colors.accent else tokens.colors.textMuted,
                             maxLines = 1,
@@ -582,28 +575,3 @@ private fun Long.floorToGuideHour(): Long = this - (this % GUIDE_HOUR_MS)
 
 private fun durationToGuideDp(durationMs: Long): Dp =
     ((durationMs.toDouble() / GUIDE_MINUTE_MS.toDouble()) * GUIDE_DP_PER_MINUTE.value).dp
-
-private fun guideClockLabel(
-    epochMs: Long,
-    referenceProgramme: LiveTvProgramme?,
-): String {
-    val referenceTime = referenceProgramme
-        ?.timeLabel
-        ?.substringBefore(" - ")
-        ?.split(':')
-        ?.takeIf { it.size == 2 }
-    val referenceHour = referenceTime?.getOrNull(0)?.toIntOrNull()
-    val referenceMinute = referenceTime?.getOrNull(1)?.toIntOrNull()
-
-    if (referenceProgramme == null || referenceHour == null || referenceMinute == null) {
-        val relativeHour = ((epochMs / GUIDE_HOUR_MS) % 24L).toInt()
-        return "${relativeHour.toString().padStart(2, '0')}:00"
-    }
-
-    val referenceMinutes = (referenceHour * 60) + referenceMinute
-    val deltaMinutes = ((epochMs - referenceProgramme.startEpochMs) / GUIDE_MINUTE_MS).toInt()
-    val totalMinutes = ((referenceMinutes + deltaMinutes) % (24 * 60) + (24 * 60)) % (24 * 60)
-    val hour = totalMinutes / 60
-    val minute = totalMinutes % 60
-    return "${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}"
-}
