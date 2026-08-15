@@ -1,0 +1,30 @@
+name: EPG iOS Validation
+
+on:
+  push:
+    branches:
+      - ci/epg-ios-validation
+
+permissions:
+  contents: read
+
+jobs:
+  ios-compile:
+    runs-on: macos-15
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Create CI local properties
+        run: touch local.properties
+
+      - name: Compile iOS simulator shared framework sources
+        run: ./gradlew :composeApp:compileKotlinIosSimulatorArm64 -Pnuvio.ios.distribution=full --stacktrace
