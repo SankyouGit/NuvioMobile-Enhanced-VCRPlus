@@ -1,0 +1,42 @@
+name: IPTV Feature CI
+
+on:
+  push:
+    branches:
+      - feature/favorites-epg-grid
+  pull_request:
+    branches:
+      - enhanced
+    paths:
+      - 'composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/**'
+      - 'composeApp/src/commonTest/kotlin/com/nuvio/app/features/livetv/**'
+      - 'composeApp/build.gradle.kts'
+      - 'androidApp/build.gradle.kts'
+      - '.github/workflows/iptv-feature-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  android-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Run shared Android host tests
+        run: ./gradlew :composeApp:testAndroidHostTest -Pnuvio.android.distribution=full --stacktrace
+
+      - name: Compile full IPTV debug APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full --stacktrace
