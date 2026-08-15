@@ -89,4 +89,61 @@ class LiveTvPlaylistParserTest {
         assertEquals(1, channels.size)
         assertEquals("TRT 1 HD", channels.first().name)
     }
+
+    @Test
+    fun retainsCurrentAndFutureXmlTvProgrammes() {
+        val schedule = parseXmlTvProgrammeSchedule(
+            content = """
+                <tv>
+                    <programme start="20240101000000 +0000" stop="20240101003000 +0000" channel="one">
+                        <title>Past</title>
+                    </programme>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="one">
+                        <title>Current &amp; Live</title>
+                    </programme>
+                    <programme start="20240101010000 +0000" stop="20240101020000 +0000" channel="one">
+                        <title>Future</title>
+                    </programme>
+                </tv>
+            """.trimIndent(),
+            nowEpochMs = 1704069900000L,
+        )
+
+        assertEquals(
+            listOf("Current & Live", "Future"),
+            schedule["one"]?.map(LiveTvProgramme::title),
+        )
+        assertEquals("00:30 - 01:00", schedule["one"]?.first()?.timeLabel)
+
+        val current = currentXmlTvProgrammes(
+            programmesByChannel = schedule,
+            nowEpochMs = 1704069900000L,
+        )
+        assertEquals("Current & Live", current["one"]?.title)
+    }
+
+    @Test
+    fun mergesAndDeduplicatesXmlTvSchedules() {
+        val first = LiveTvProgramme(
+            title = "First",
+            startEpochMs = 1000L,
+            stopEpochMs = 2000L,
+            timeLabel = "00:00 - 00:30",
+        )
+        val second = LiveTvProgramme(
+            title = "Second",
+            startEpochMs = 2000L,
+            stopEpochMs = 3000L,
+            timeLabel = "00:30 - 01:00",
+        )
+
+        val merged = mergeXmlTvProgrammeSchedules(
+            listOf(
+                mapOf("one" to listOf(second, first)),
+                mapOf("one" to listOf(first)),
+            ),
+        )
+
+        assertEquals(listOf(first, second), merged["one"])
+    }
 }
