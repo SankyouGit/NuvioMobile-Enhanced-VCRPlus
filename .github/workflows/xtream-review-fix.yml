@@ -1,0 +1,161 @@
+name: Xtream Review Fix
+
+on:
+  push:
+    branches:
+      - feature/xtream-epg-categories
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-build:
+    if: ${{ !contains(github.event.head_commit.message, '[xtream-review-fixed]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/xtream-epg-categories
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply review fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt")
+          text = path.read_text()
+
+          old_discovery_start = '''        mutableUiState.value = mutableUiState.value.copy(
+            sourceType = LiveTvSourceType.Xtream,
+            sourceUrl = normalizedSettings.serverUrl,
+            xtreamSettings = normalizedSettings,
+            isLoading = true,
+            errorMessage = null,
+        )
+
+        return runCatching {
+            val categoryMap = withContext(Dispatchers.Default) {
+                LiveTvRepositoryXtream.getLiveCategories(normalizedSettings)
+            }
+            val categories = categoryMap
+                .map { (id, name) -> LiveTvXtreamCategory(id = id, name = name) }
+                .sortedBy { it.name.lowercase() }
+            require(categories.isNotEmpty()) { "No live categories were found for this Xtream provider." }
+            val validSelection = normalizedSettings.selectedCategoryIds.intersect(categoryMap.keys)
+            mutableUiState.value = mutableUiState.value.copy(
+                sourceType = LiveTvSourceType.Xtream,
+                sourceUrl = normalizedSettings.serverUrl,
+                xtreamSettings = normalizedSettings.copy(selectedCategoryIds = validSelection),
+                isLoading = false,
+                errorMessage = null,
+            )
+            categories
+'''
+          new_discovery_start = '''        mutableUiState.value = mutableUiState.value.copy(
+            isLoading = true,
+            errorMessage = null,
+        )
+
+        return runCatching {
+            val categoryMap = withContext(Dispatchers.Default) {
+                LiveTvRepositoryXtream.getLiveCategories(normalizedSettings)
+            }
+            val categories = categoryMap
+                .map { (id, name) -> LiveTvXtreamCategory(id = id, name = name) }
+                .sortedBy { it.name.lowercase() }
+            require(categories.isNotEmpty()) { "No live categories were found for this Xtream provider." }
+            mutableUiState.value = mutableUiState.value.copy(
+                isLoading = false,
+                errorMessage = null,
+            )
+            categories
+'''
+          if text.count(old_discovery_start) != 1:
+              raise SystemExit("Discovery-state marker missing or ambiguous")
+          text = text.replace(old_discovery_start, new_discovery_start, 1)
+
+          old_scoped = '''            val scopedData = selectedCategoryIds
+                .sorted()
+                .flatMap { categoryId ->
+                    runCatching {
+                        request(
+                            settings = settings,
+                            action = "get_live_streams",
+                            extraParameters = mapOf("category_id" to categoryId),
+                        ).jsonArrayOrEmpty()
+                    }.getOrElse { emptyList() }
+                }
+            if (scopedData.isNotEmpty()) {
+                scopedData
+            } else {
+                request(settings, action = "get_live_streams")
+                    .jsonArrayOrEmpty()
+                    .filter { element ->
+                        val obj = element as? JsonObject
+                        obj?.stringValue("category_id") in selectedCategoryIds
+                    }
+            }
+'''
+          new_scoped = '''            var scopedRequestFailed = false
+            val scopedData = selectedCategoryIds
+                .sorted()
+                .flatMap { categoryId ->
+                    runCatching {
+                        request(
+                            settings = settings,
+                            action = "get_live_streams",
+                            extraParameters = mapOf("category_id" to categoryId),
+                        ).jsonArrayOrEmpty()
+                    }.getOrElse {
+                        scopedRequestFailed = true
+                        emptyList()
+                    }
+                }
+            if (!scopedRequestFailed) {
+                scopedData
+            } else {
+                request(settings, action = "get_live_streams")
+                    .jsonArrayOrEmpty()
+                    .filter { element ->
+                        val obj = element as? JsonObject
+                        obj?.stringValue("category_id") in selectedCategoryIds
+                    }
+            }
+'''
+          if text.count(old_scoped) != 1:
+              raise SystemExit("Scoped-request marker missing or ambiguous")
+          text = text.replace(old_scoped, new_scoped, 1)
+          path.write_text(text)
+          PY
+
+          git diff --check
+
+      - name: Commit review fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt
+          git commit -m "fix: keep Xtream discovery non-destructive [xtream-review-fixed]"
+          git push origin HEAD:feature/xtream-epg-categories
+
+      - name: Create CI local properties
+        run: touch local.properties
+
+      - name: Build side-by-side Full APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+
+      - name: Upload Xtream test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-vcrplus-xtream-debug
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
