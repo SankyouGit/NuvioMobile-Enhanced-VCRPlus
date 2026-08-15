@@ -1,0 +1,54 @@
+name: IPTV Feature CI
+
+on:
+  push:
+    branches:
+      - feature/favorites-epg-grid
+  pull_request:
+    branches:
+      - enhanced
+    paths:
+      - 'composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/**'
+      - 'composeApp/src/commonTest/kotlin/com/nuvio/app/features/livetv/**'
+      - 'composeApp/build.gradle.kts'
+      - 'androidApp/build.gradle.kts'
+      - '.github/workflows/iptv-feature-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  android-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Create CI local properties
+        run: touch local.properties
+
+      - name: Compile side-by-side full IPTV debug APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+
+      - name: Upload side-by-side full IPTV debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-vcrplus-side-by-side-debug
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run repository Android host tests
+        continue-on-error: true
+        run: ./gradlew :composeApp:testAndroidHostTest -Pnuvio.android.distribution=full --stacktrace

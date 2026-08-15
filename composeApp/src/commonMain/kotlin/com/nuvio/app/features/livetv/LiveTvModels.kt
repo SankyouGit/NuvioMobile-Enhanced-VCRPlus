@@ -38,6 +38,7 @@ data class LiveTvUiState(
     val xtreamSettings: LiveTvXtreamSettings = LiveTvXtreamSettings(),
     val channels: List<LiveTvChannel> = emptyList(),
     val currentProgrammes: Map<String, LiveTvProgramme> = emptyMap(),
+    val programmesByChannel: Map<String, List<LiveTvProgramme>> = emptyMap(),
     val recentChannel: LiveTvRecentChannel? = null,
     val favoriteUrls: Set<String> = emptySet(),
     val isEpgLoading: Boolean = false,

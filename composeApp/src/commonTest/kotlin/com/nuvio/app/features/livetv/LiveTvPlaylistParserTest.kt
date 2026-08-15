@@ -89,4 +89,123 @@ class LiveTvPlaylistParserTest {
         assertEquals(1, channels.size)
         assertEquals("TRT 1 HD", channels.first().name)
     }
+
+    @Test
+    fun retainsCurrentAndFutureXmlTvProgrammesForFavoriteChannel() {
+        val schedule = parseXmlTvProgrammeSchedule(
+            content = """
+                <tv>
+                    <programme start="20240101000000 +0000" stop="20240101003000 +0000" channel="one">
+                        <title>Past</title>
+                    </programme>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="one">
+                        <title>Current &amp; Live</title>
+                    </programme>
+                    <programme start="20240101010000 +0000" stop="20240101020000 +0000" channel="one">
+                        <title>Future</title>
+                    </programme>
+                </tv>
+            """.trimIndent(),
+            nowEpochMs = 1704069900000L,
+            relevantChannelIds = setOf("one"),
+            retainedScheduleChannelIds = setOf("one"),
+        )
+
+        assertEquals(
+            listOf("Current & Live", "Future"),
+            schedule["one"]?.map(LiveTvProgramme::title),
+        )
+        assertEquals("00:30 - 01:00", schedule["one"]?.first()?.timeLabel)
+
+        val current = currentXmlTvProgrammes(
+            programmesByChannel = schedule,
+            nowEpochMs = 1704069900000L,
+        )
+        assertEquals("Current & Live", current["one"]?.title)
+    }
+
+    @Test
+    fun retainsCurrentForAllRelevantChannelsButFutureOnlyForFavorites() {
+        val schedule = parseXmlTvProgrammeSchedule(
+            content = """
+                <tv>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="favorite">
+                        <title>Favorite Current</title>
+                    </programme>
+                    <programme start="20240101010000 +0000" stop="20240101020000 +0000" channel="favorite">
+                        <title>Favorite Future</title>
+                    </programme>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="other">
+                        <title>Other Current</title>
+                    </programme>
+                    <programme start="20240101010000 +0000" stop="20240101020000 +0000" channel="other">
+                        <title>Other Future</title>
+                    </programme>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="provider-only">
+                        <title>Provider Only</title>
+                    </programme>
+                </tv>
+            """.trimIndent(),
+            nowEpochMs = 1704069900000L,
+            relevantChannelIds = setOf("favorite", "other"),
+            retainedScheduleChannelIds = setOf("favorite"),
+        )
+
+        assertEquals(
+            listOf("Favorite Current", "Favorite Future"),
+            schedule["favorite"]?.map(LiveTvProgramme::title),
+        )
+        assertEquals(listOf("Other Current"), schedule["other"]?.map(LiveTvProgramme::title))
+        assertEquals(null, schedule["provider-only"])
+
+        val current = currentXmlTvProgrammes(schedule, nowEpochMs = 1704069900000L)
+        assertEquals("Favorite Current", current["favorite"]?.title)
+        assertEquals("Other Current", current["other"]?.title)
+    }
+
+    @Test
+    fun dropsProviderProgrammesWhenNoChannelIdsAreRelevant() {
+        val schedule = parseXmlTvProgrammeSchedule(
+            content = """
+                <tv>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="provider-one">
+                        <title>Provider Current</title>
+                    </programme>
+                    <programme start="20240101010000 +0000" stop="20240101020000 +0000" channel="provider-one">
+                        <title>Provider Future</title>
+                    </programme>
+                </tv>
+            """.trimIndent(),
+            nowEpochMs = 1704069900000L,
+            relevantChannelIds = emptySet(),
+            retainedScheduleChannelIds = emptySet(),
+        )
+
+        assertEquals(emptyMap(), schedule)
+    }
+
+    @Test
+    fun mergesAndDeduplicatesXmlTvSchedules() {
+        val first = LiveTvProgramme(
+            title = "First",
+            startEpochMs = 1000L,
+            stopEpochMs = 2000L,
+            timeLabel = "00:00 - 00:30",
+        )
+        val second = LiveTvProgramme(
+            title = "Second",
+            startEpochMs = 2000L,
+            stopEpochMs = 3000L,
+            timeLabel = "00:30 - 01:00",
+        )
+
+        val merged = mergeXmlTvProgrammeSchedules(
+            listOf(
+                mapOf("one" to listOf(second, first)),
+                mapOf("one" to listOf(first)),
+            ),
+        )
+
+        assertEquals(listOf(first, second), merged["one"])
+    }
 }

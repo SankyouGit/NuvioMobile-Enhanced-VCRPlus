@@ -5,7 +5,11 @@ import com.nuvio.app.features.addons.httpGetTextWithHeaders
 import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -23,6 +27,11 @@ object LiveTvRepository {
     private val mutableUiState = MutableStateFlow(LiveTvUiState())
     val uiState = mutableUiState.asStateFlow()
     private val epgScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val epgMutex = Mutex()
+    private var epgJob: Job? = null
+    private var favoriteEpgReloadJob: Job? = null
+    private var activeEpgSourceUrl: String? = null
+    private var activeEpgUrls: List<String> = emptyList()
 
     private var initialized = false
 
@@ -152,8 +161,10 @@ object LiveTvRepository {
                 channels = channels,
                 favoriteUrls = mutableUiState.value.favoriteUrls,
                 recentChannel = mutableUiState.value.recentChannel,
+                isEpgLoading = playlist.epgUrls.isNotEmpty(),
                 isLoaded = true,
             )
+            loadEpgInBackground(displayName, playlist.epgUrls)
             channels
         }.onFailure { error ->
             mutableUiState.value = mutableUiState.value.copy(
@@ -295,12 +306,57 @@ object LiveTvRepository {
     }
 
     fun toggleFavorite(channel: LiveTvChannel) {
-        val favorites = mutableUiState.value.favoriteUrls.toMutableSet()
-        if (!favorites.add(channel.streamUrl)) {
+        val state = mutableUiState.value
+        val favorites = state.favoriteUrls.toMutableSet()
+        val wasAdded = favorites.add(channel.streamUrl)
+        if (!wasAdded) {
             favorites.remove(channel.streamUrl)
         }
         LiveTvStorage.saveFavoriteUrls(favorites)
-        mutableUiState.value = mutableUiState.value.copy(favoriteUrls = favorites)
+
+        val nowEpochMs = LiveTvClock.nowEpochMs()
+        val favoriteTvgIds = state.channels
+            .asSequence()
+            .filter { candidate -> candidate.streamUrl in favorites }
+            .mapNotNull(LiveTvChannel::tvgId)
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .toSet()
+        val retainedProgrammes = state.programmesByChannel
+            .mapValues { (channelId, programmes) ->
+                if (channelId in favoriteTvgIds) {
+                    programmes
+                } else {
+                    programmes.filter { programme ->
+                        nowEpochMs in programme.startEpochMs until programme.stopEpochMs
+                    }
+                }
+            }
+            .filterValues(List<LiveTvProgramme>::isNotEmpty)
+
+        mutableUiState.value = state.copy(
+            favoriteUrls = favorites,
+            programmesByChannel = retainedProgrammes,
+        )
+
+        if (
+            !channel.tvgId.isNullOrBlank() &&
+            activeEpgUrls.isNotEmpty() &&
+            activeEpgSourceUrl == state.sourceUrl
+        ) {
+            favoriteEpgReloadJob?.cancel()
+            favoriteEpgReloadJob = epgScope.launch {
+                delay(600L)
+                val latestState = mutableUiState.value
+                if (
+                    activeEpgUrls.isNotEmpty() &&
+                    activeEpgSourceUrl == latestState.sourceUrl
+                ) {
+                    mutableUiState.value = latestState.copy(isEpgLoading = true)
+                    loadEpgInBackground(latestState.sourceUrl, activeEpgUrls)
+                }
+            }
+        }
     }
 
     fun recordRecentChannel(channel: LiveTvChannel) {
@@ -316,20 +372,35 @@ object LiveTvRepository {
     }
 
     private fun loadEpgInBackground(sourceUrl: String, epgUrls: List<String>) {
+        activeEpgSourceUrl = sourceUrl
+        activeEpgUrls = epgUrls
+        epgJob?.cancel()
         if (epgUrls.isEmpty()) return
-        epgScope.launch {
-            val programmes = epgUrls
-                .mapNotNull { epgUrl ->
-                    runCatching {
-                        parseCurrentXmlTvProgrammes(httpGetText(epgUrl))
-                    }.getOrNull()
-                }
-                .fold(emptyMap<String, LiveTvProgramme>()) { merged, entries -> merged + entries }
-            if (mutableUiState.value.sourceUrl == sourceUrl) {
-                mutableUiState.value = mutableUiState.value.copy(
-                    currentProgrammes = programmes,
-                    isEpgLoading = false,
+        epgJob = epgScope.launch {
+            epgMutex.lock()
+            try {
+                if (!isActive) return@launch
+                val nowEpochMs = LiveTvClock.nowEpochMs()
+                val programmesByChannel = mergeXmlTvProgrammeSchedules(
+                    epgUrls.mapNotNull { epgUrl ->
+                        runCatching {
+                            parseXmlTvProgrammeSchedule(
+                                content = httpGetText(epgUrl),
+                                nowEpochMs = nowEpochMs,
+                            )
+                        }.getOrNull()
+                    },
                 )
+                if (!isActive) return@launch
+                if (mutableUiState.value.sourceUrl == sourceUrl) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        programmesByChannel = programmesByChannel,
+                        currentProgrammes = currentXmlTvProgrammes(programmesByChannel, nowEpochMs),
+                        isEpgLoading = false,
+                    )
+                }
+            } finally {
+                epgMutex.unlock()
             }
         }
     }
@@ -822,58 +893,15 @@ internal fun isLikelyCategoryHeading(name: String): Boolean {
 
 internal expect object LiveTvClock {
     fun nowEpochMs(): Long
+    fun formatLocalTime(epochMs: Long): String
     fun parseXmlTvTimestamp(value: String): Long?
 }
-
-private val xmlTvProgrammeRegex = Regex(
-    """<programme\b([^>]*)>([\s\S]*?)</programme>""",
-    RegexOption.IGNORE_CASE,
-)
-private val xmlTvTitleRegex = Regex(
-    """<title\b[^>]*>([\s\S]*?)</title>""",
-    RegexOption.IGNORE_CASE,
-)
-private val xmlAttributeRegex = Regex("""([\w-]+)="([^"]*)"""")
 
 internal fun parseCurrentXmlTvProgrammes(
     content: String,
     nowEpochMs: Long = LiveTvClock.nowEpochMs(),
-): Map<String, LiveTvProgramme> {
-    val programmes = mutableMapOf<String, LiveTvProgramme>()
-    xmlTvProgrammeRegex.findAll(content).forEach { match ->
-        val attributes = xmlAttributeRegex.findAll(match.groupValues[1])
-            .associate { attribute -> attribute.groupValues[1].lowercase() to attribute.groupValues[2] }
-        val channelId = attributes["channel"]?.trim()?.takeIf(String::isNotBlank) ?: return@forEach
-        val rawStart = attributes["start"].orEmpty()
-        val rawStop = attributes["stop"].orEmpty()
-        val startEpochMs = LiveTvClock.parseXmlTvTimestamp(rawStart) ?: return@forEach
-        val stopEpochMs = LiveTvClock.parseXmlTvTimestamp(rawStop) ?: return@forEach
-        if (nowEpochMs !in startEpochMs until stopEpochMs) return@forEach
-        val title = xmlTvTitleRegex.find(match.groupValues[2])
-            ?.groupValues
-            ?.get(1)
-            ?.decodeXmlEntities()
-            ?.trim()
-            ?.takeIf(String::isNotBlank)
-            ?: return@forEach
-        programmes[channelId] = LiveTvProgramme(
-            title = title,
-            startEpochMs = startEpochMs,
-            stopEpochMs = stopEpochMs,
-            timeLabel = "${rawStart.xmlTvTimePart()} - ${rawStop.xmlTvTimePart()}",
-        )
-    }
-    return programmes
-}
-
-private fun String.xmlTvTimePart(): String {
-    val digits = takeWhile(Char::isDigit)
-    return if (digits.length >= 12) "${digits.substring(8, 10)}:${digits.substring(10, 12)}" else ""
-}
-
-private fun String.decodeXmlEntities(): String =
-    replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
+): Map<String, LiveTvProgramme> =
+    currentXmlTvProgrammes(
+        programmesByChannel = parseXmlTvProgrammeSchedule(content, nowEpochMs),
+        nowEpochMs = nowEpochMs,
+    )
