@@ -1,4 +1,4 @@
-name: Xtream Review Fix
+name: Xtream Final Validation
 
 on:
   push:
@@ -22,176 +22,16 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Apply review fixes if needed
+      - name: Apply final scoped-request fixes
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt")
           text = path.read_text()
 
-          old_discovery = "\n".join([
-              "        mutableUiState.value = mutableUiState.value.copy(",
-              "            sourceType = LiveTvSourceType.Xtream,",
-              "            sourceUrl = normalizedSettings.serverUrl,",
-              "            xtreamSettings = normalizedSettings,",
-              "            isLoading = true,",
-              "            errorMessage = null,",
-              "        )",
-              "",
-              "        return runCatching {",
-              "            val categoryMap = withContext(Dispatchers.Default) {",
-              "                LiveTvRepositoryXtream.getLiveCategories(normalizedSettings)",
-              "            }",
-              "            val categories = categoryMap",
-              "                .map { (id, name) -> LiveTvXtreamCategory(id = id, name = name) }",
-              "                .sortedBy { it.name.lowercase() }",
-              "            require(categories.isNotEmpty()) { \"No live categories were found for this Xtream provider.\" }",
-              "            val validSelection = normalizedSettings.selectedCategoryIds.intersect(categoryMap.keys)",
-              "            mutableUiState.value = mutableUiState.value.copy(",
-              "                sourceType = LiveTvSourceType.Xtream,",
-              "                sourceUrl = normalizedSettings.serverUrl,",
-              "                xtreamSettings = normalizedSettings.copy(selectedCategoryIds = validSelection),",
-              "                isLoading = false,",
-              "                errorMessage = null,",
-              "            )",
-              "            categories",
-          ]) + "\n"
-          new_discovery = "\n".join([
-              "        mutableUiState.value = mutableUiState.value.copy(",
-              "            isLoading = true,",
-              "            errorMessage = null,",
-              "        )",
-              "",
-              "        return runCatching {",
-              "            val categoryMap = withContext(Dispatchers.Default) {",
-              "                LiveTvRepositoryXtream.getLiveCategories(normalizedSettings)",
-              "            }",
-              "            val categories = categoryMap",
-              "                .map { (id, name) -> LiveTvXtreamCategory(id = id, name = name) }",
-              "                .sortedBy { it.name.lowercase() }",
-              "            require(categories.isNotEmpty()) { \"No live categories were found for this Xtream provider.\" }",
-              "            mutableUiState.value = mutableUiState.value.copy(",
-              "                isLoading = false,",
-              "                errorMessage = null,",
-              "            )",
-              "            categories",
-          ]) + "\n"
-          if old_discovery in text:
-              text = text.replace(old_discovery, new_discovery, 1)
-          elif new_discovery not in text:
-              raise SystemExit("Xtream discovery marker is in an unexpected state")
-
-          old_scoped = "\n".join([
-              "            val scopedData = selectedCategoryIds",
-              "                .sorted()",
-              "                .flatMap { categoryId ->",
-              "                    runCatching {",
-              "                        request(",
-              "                            settings = settings,",
-              "                            action = \"get_live_streams\",",
-              "                            extraParameters = mapOf(\"category_id\" to categoryId),",
-              "                        ).jsonArrayOrEmpty()",
-              "                    }.getOrElse { emptyList() }",
-              "                }",
-              "            if (scopedData.isNotEmpty()) {",
-              "                scopedData",
-              "            } else {",
-              "                request(settings, action = \"get_live_streams\")",
-              "                    .jsonArrayOrEmpty()",
-              "                    .filter { element ->",
-              "                        val obj = element as? JsonObject",
-              "                        obj?.stringValue(\"category_id\") in selectedCategoryIds",
-              "                    }",
-              "            }",
-          ]) + "\n"
-          new_scoped = "\n".join([
-              "            var scopedRequestFailed = false",
-              "            val scopedData = selectedCategoryIds",
-              "                .sorted()",
-              "                .flatMap { categoryId ->",
-              "                    runCatching {",
-              "                        request(",
-              "                            settings = settings,",
-              "                            action = \"get_live_streams\",",
-              "                            extraParameters = mapOf(\"category_id\" to categoryId),",
-              "                        ).jsonArrayOrEmpty()",
-              "                    }.getOrElse {",
-              "                        scopedRequestFailed = true",
-              "                        emptyList()",
-              "                    }",
-              "                }",
-              "            if (!scopedRequestFailed) {",
-              "                scopedData",
-              "            } else {",
-              "                request(settings, action = \"get_live_streams\")",
-              "                    .jsonArrayOrEmpty()",
-              "                    .filter { element ->",
-              "                        val obj = element as? JsonObject",
-              "                        obj?.stringValue(\"category_id\") in selectedCategoryIds",
-              "                    }",
-              "            }",
-          ]) + "\n"
-          if old_scoped in text:
-              text = text.replace(old_scoped, new_scoped, 1)
-          elif new_scoped not in text:
-              raise SystemExit("Xtream scoped-request marker is in an unexpected state")
-
-          object_header = "private object LiveTvRepositoryXtream {\n"
-          object_header_with_limit = "private object LiveTvRepositoryXtream {\n    private const val MAX_SCOPED_CATEGORY_REQUESTS = 24\n"
-          if object_header_with_limit not in text:
-              if object_header not in text:
-                  raise SystemExit("Xtream repository object marker missing")
-              text = text.replace(object_header, object_header_with_limit, 1)
-
-          old_data = "\n".join([
-              "        val data = if (selectedCategoryIds.isEmpty()) {",
-              "            request(settings, action = \"get_live_streams\").jsonArrayOrEmpty()",
-              "        } else {",
-              "            var scopedRequestFailed = false",
-              "            val scopedData = selectedCategoryIds",
-              "                .sorted()",
-              "                .flatMap { categoryId ->",
-              "                    runCatching {",
-              "                        request(",
-              "                            settings = settings,",
-              "                            action = \"get_live_streams\",",
-              "                            extraParameters = mapOf(\"category_id\" to categoryId),",
-              "                        ).jsonArrayOrEmpty()",
-              "                    }.getOrElse {",
-              "                        scopedRequestFailed = true",
-              "                        emptyList()",
-              "                    }",
-              "                }",
-              "            if (!scopedRequestFailed) {",
-              "                scopedData",
-              "            } else {",
-              "                request(settings, action = \"get_live_streams\")",
-              "                    .jsonArrayOrEmpty()",
-              "                    .filter { element ->",
-              "                        val obj = element as? JsonObject",
-              "                        obj?.stringValue(\"category_id\") in selectedCategoryIds",
-              "                    }",
-              "            }",
-              "        }",
-          ]) + "\n"
-          new_data = "\n".join([
-              "        val useUnscopedFilteredRequest = selectedCategoryIds.isNotEmpty() && (",
-              "            selectedCategoryIds.size == categories.size ||",
-              "                selectedCategoryIds.size > MAX_SCOPED_CATEGORY_REQUESTS",
-              "            )",
-              "        val data = when {",
-              "            selectedCategoryIds.isEmpty() ->",
-              "                request(settings, action = \"get_live_streams\").jsonArrayOrEmpty()",
-              "",
-              "            useUnscopedFilteredRequest ->",
-              "                request(settings, action = \"get_live_streams\")",
-              "                    .jsonArrayOrEmpty()",
-              "                    .filter { element ->",
-              "                        val obj = element as? JsonObject",
-              "                        obj?.stringValue(\"category_id\") in selectedCategoryIds",
-              "                    }",
-              "",
+          old = "\n".join([
               "            else -> {",
               "                var scopedRequestFailed = false",
               "                val scopedData = selectedCategoryIds",
@@ -219,27 +59,56 @@ jobs:
               "                        }",
               "                }",
               "            }",
-              "        }",
           ]) + "\n"
-          if old_data in text:
-              text = text.replace(old_data, new_data, 1)
-          elif new_data not in text:
-              raise SystemExit("Xtream large-selection marker is in an unexpected state")
 
-          path.write_text(text)
+          new = "\n".join([
+              "            else -> {",
+              "                val scopedData = mutableListOf<JsonElement>()",
+              "                var scopedRequestFailed = false",
+              "                for (categoryId in selectedCategoryIds.sorted()) {",
+              "                    val response = runCatching {",
+              "                        request(",
+              "                            settings = settings,",
+              "                            action = \"get_live_streams\",",
+              "                            extraParameters = mapOf(\"category_id\" to categoryId),",
+              "                        )",
+              "                    }.getOrNull()",
+              "                    if (response !is JsonArray) {",
+              "                        scopedRequestFailed = true",
+              "                        break",
+              "                    }",
+              "                    scopedData.addAll(response)",
+              "                }",
+              "                if (!scopedRequestFailed) {",
+              "                    scopedData",
+              "                } else {",
+              "                    request(settings, action = \"get_live_streams\")",
+              "                        .jsonArrayOrEmpty()",
+              "                        .filter { element ->",
+              "                            val obj = element as? JsonObject",
+              "                            obj?.stringValue(\"category_id\") in selectedCategoryIds",
+              "                        }",
+              "                }",
+              "            }",
+          ]) + "\n"
+
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit("Scoped Xtream block is in an unexpected state")
           PY
           git diff --check
 
-      - name: Commit review fixes if changed
+      - name: Commit final fixes if changed
         shell: bash
         run: |
           if git diff --quiet -- composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt; then
-            echo "Xtream review fixes already applied."
+            echo "Final Xtream scoped-request fixes already applied."
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt
-            git commit -m "fix: bound Xtream category stream requests"
+            git commit -m "fix: fail fast on unsupported Xtream category requests"
             git push origin HEAD:feature/xtream-epg-categories
           fi
 
