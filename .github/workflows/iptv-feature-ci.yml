@@ -35,6 +35,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Create CI local properties
+        run: touch local.properties
+
       - name: Run shared Android host tests
         run: ./gradlew :composeApp:testAndroidHostTest -Pnuvio.android.distribution=full --stacktrace
 
