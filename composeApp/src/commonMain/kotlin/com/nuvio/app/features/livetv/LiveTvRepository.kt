@@ -5,6 +5,8 @@ import com.nuvio.app.features.addons.httpGetTextWithHeaders
 import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +25,7 @@ object LiveTvRepository {
     private val mutableUiState = MutableStateFlow(LiveTvUiState())
     val uiState = mutableUiState.asStateFlow()
     private val epgScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var epgJob: Job? = null
 
     private var initialized = false
 
@@ -318,8 +321,9 @@ object LiveTvRepository {
     }
 
     private fun loadEpgInBackground(sourceUrl: String, epgUrls: List<String>) {
+        epgJob?.cancel()
         if (epgUrls.isEmpty()) return
-        epgScope.launch {
+        epgJob = epgScope.launch {
             val nowEpochMs = LiveTvClock.nowEpochMs()
             val programmesByChannel = mergeXmlTvProgrammeSchedules(
                 epgUrls.mapNotNull { epgUrl ->
@@ -331,6 +335,7 @@ object LiveTvRepository {
                     }.getOrNull()
                 },
             )
+            if (!isActive) return@launch
             if (mutableUiState.value.sourceUrl == sourceUrl) {
                 mutableUiState.value = mutableUiState.value.copy(
                     programmesByChannel = programmesByChannel,
