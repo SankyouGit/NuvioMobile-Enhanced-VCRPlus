@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -57,8 +56,8 @@ private val GUIDE_CHANNEL_WIDTH = 136.dp
 private val GUIDE_ROW_HEIGHT = 82.dp
 private val GUIDE_TIME_HEADER_HEIGHT = 44.dp
 private val GUIDE_DP_PER_MINUTE = 2.dp
-private val GUIDE_HOUR_WIDTH = 60 * GUIDE_DP_PER_MINUTE
-private val GUIDE_TIMELINE_WIDTH = 24 * GUIDE_HOUR_WIDTH
+private val GUIDE_HOUR_WIDTH = GUIDE_DP_PER_MINUTE * 60f
+private val GUIDE_TIMELINE_WIDTH = GUIDE_HOUR_WIDTH * 24f
 
 @Composable
 internal fun LiveTvFavoritesGuide(
@@ -68,6 +67,7 @@ internal fun LiveTvFavoritesGuide(
     isEpgLoading: Boolean,
     onChannelClick: (LiveTvChannel) -> Unit,
     onBack: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val tokens = MaterialTheme.nuvio
     val favoriteChannels = remember(channels, favoriteUrls) {
@@ -116,7 +116,7 @@ internal fun LiveTvFavoritesGuide(
     PlatformBackHandler(enabled = true, onBack = onBack)
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .background(tokens.colors.background)
             .padding(horizontal = 16.dp),
@@ -158,9 +158,7 @@ internal fun LiveTvFavoritesGuide(
                     )
                 }
                 Surface(
-                    onClick = {
-                        pageOffset = 0
-                    },
+                    onClick = { pageOffset = 0 },
                     enabled = pageOffset != 0,
                     color = tokens.colors.overlaySelected,
                     shape = tokens.shapes.chip,
@@ -386,7 +384,7 @@ private fun GuideTimeHeader(
             .height(GUIDE_TIME_HEADER_HEIGHT),
     ) {
         repeat(24) { hourIndex ->
-            val x = hourIndex * GUIDE_HOUR_WIDTH
+            val x = GUIDE_HOUR_WIDTH * hourIndex.toFloat()
             Box(
                 modifier = Modifier
                     .offset(x = x)
@@ -437,7 +435,7 @@ private fun GuideProgrammeRow(
         repeat(24) { hourIndex ->
             Box(
                 modifier = Modifier
-                    .offset(x = hourIndex * GUIDE_HOUR_WIDTH)
+                    .offset(x = GUIDE_HOUR_WIDTH * hourIndex.toFloat())
                     .width(NuvioTokens.Border.thin)
                     .fillMaxHeight()
                     .background(tokens.colors.borderSubtle),
