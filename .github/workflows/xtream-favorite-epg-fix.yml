@@ -1,0 +1,159 @@
+name: Xtream Favorite EPG Fix
+
+on:
+  push:
+    branches:
+      - feature/xtream-epg-categories
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/xtream-epg-categories
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply favorites-only Xtream EPG path
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              if old in text:
+                  return text.replace(old, new, 1)
+              if new in text:
+                  return text
+              raise SystemExit(f"Unexpected source shape while patching {label}")
+
+          # LiveTvModels.kt
+          models_path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvModels.kt")
+          models = models_path.read_text()
+          models = replace_once(
+              models,
+              '    val streamType: String? = null,\n    val stalkerCommand: String? = null,\n)',
+              '    val streamType: String? = null,\n    val stalkerCommand: String? = null,\n    val xtreamStreamId: String? = null,\n)',
+              "Xtream stream id model",
+          )
+          key_fn = '''\ninternal fun LiveTvChannel.epgKey(): String =\n    tvgId?.trim()?.takeIf(String::isNotBlank) ?: id\n'''
+          if 'internal fun LiveTvChannel.epgKey()' not in models:
+              marker = '\ndata class LiveTvRecentChannel('
+              models = models.replace(marker, key_fn + marker, 1)
+          models_path.write_text(models)
+
+          # LiveTvGuide.kt
+          guide_path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvGuide.kt")
+          guide = guide_path.read_text()
+          guide = guide.replace('import androidx.compose.material3.CircularProgressIndicator\n', '')
+          guide = guide.replace(
+              '            channel.tvgId?.let(programmesByChannel::get).orEmpty()',
+              '            programmesByChannel[channel.epgKey()].orEmpty()',
+          )
+          guide = guide.replace(
+              '                            programmes = channel.tvgId?.let(programmesByChannel::get).orEmpty(),',
+              '                            programmes = programmesByChannel[channel.epgKey()].orEmpty(),',
+          )
+          guide = replace_once(
+              guide,
+              '                    text = "${favoriteChannels.size} favorite channels",',
+              '                    text = if (isEpgLoading) "${favoriteChannels.size} favorite channels · updating guide" else "${favoriteChannels.size} favorite channels",',
+              "guide loading subtitle",
+          )
+          spinner = '''\n            isEpgLoading && programmesByChannel.isEmpty() -> {\n                Box(\n                    modifier = Modifier.fillMaxSize(),\n                    contentAlignment = Alignment.Center,\n                ) {\n                    Column(\n                        horizontalAlignment = Alignment.CenterHorizontally,\n                        verticalArrangement = Arrangement.spacedBy(12.dp),\n                    ) {\n                        CircularProgressIndicator(color = tokens.colors.accent)\n                        Text(\n                            text = "Loading XMLTV guide…",\n                            style = MaterialTheme.typography.bodyMedium,\n                            color = tokens.colors.textMuted,\n                        )\n                    }\n                }\n            }\n'''
+          guide = guide.replace(spinner, '\n')
+          guide_path.write_text(guide)
+
+          # LiveTvRepository.kt
+          repo_path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt")
+          repo = repo_path.read_text()
+          imports_old = '''import kotlinx.coroutines.CoroutineScope\nimport kotlinx.coroutines.Dispatchers\nimport kotlinx.coroutines.Job\nimport kotlinx.coroutines.delay\nimport kotlinx.coroutines.isActive\nimport kotlinx.coroutines.SupervisorJob\nimport kotlinx.coroutines.sync.Mutex\nimport kotlinx.coroutines.flow.MutableStateFlow\nimport kotlinx.coroutines.flow.asStateFlow\nimport kotlinx.coroutines.launch\nimport kotlinx.coroutines.withContext\n'''
+          imports_new = '''import kotlinx.coroutines.CoroutineScope\nimport kotlinx.coroutines.Dispatchers\nimport kotlinx.coroutines.Job\nimport kotlinx.coroutines.SupervisorJob\nimport kotlinx.coroutines.async\nimport kotlinx.coroutines.awaitAll\nimport kotlinx.coroutines.coroutineScope\nimport kotlinx.coroutines.delay\nimport kotlinx.coroutines.flow.MutableStateFlow\nimport kotlinx.coroutines.flow.asStateFlow\nimport kotlinx.coroutines.isActive\nimport kotlinx.coroutines.launch\nimport kotlinx.coroutines.sync.Mutex\nimport kotlinx.coroutines.sync.Semaphore\nimport kotlinx.coroutines.sync.withPermit\nimport kotlinx.coroutines.withContext\nimport kotlinx.coroutines.withTimeoutOrNull\n'''
+          repo = replace_once(repo, imports_old, imports_new, "coroutine imports")
+          if 'import kotlin.io.encoding.Base64\n' not in repo:
+              repo = repo.replace('import kotlinx.serialization.json.jsonPrimitive\n', 'import kotlinx.serialization.json.jsonPrimitive\nimport kotlin.io.encoding.Base64\n', 1)
+          constants = '''\nprivate const val XTREAM_EPG_LIMIT = 96\nprivate const val XTREAM_EPG_MAX_CONCURRENCY = 8\nprivate const val XTREAM_EPG_REQUEST_TIMEOUT_MS = 10_000L\n\n'''
+          if 'private const val XTREAM_EPG_LIMIT' not in repo:
+              repo = repo.replace('\nobject LiveTvRepository {', constants + 'object LiveTvRepository {', 1)
+
+          old_load = '''            LiveTvStorage.saveLocalPlaylistData("")\n            LiveTvStorage.saveSourceType(LiveTvSourceType.Xtream)\n            LiveTvStorage.saveXtreamSettings(effectiveSettings)\n            mutableUiState.value = LiveTvUiState(\n                sourceType = LiveTvSourceType.Xtream,\n                sourceUrl = effectiveSettings.serverUrl,\n                stalkerSettings = mutableUiState.value.stalkerSettings,\n                xtreamSettings = effectiveSettings,\n                channels = channels,\n                favoriteUrls = mutableUiState.value.favoriteUrls,\n                recentChannel = mutableUiState.value.recentChannel,\n                isEpgLoading = true,\n                isLoaded = true,\n            )\n            loadEpgInBackground(\n                sourceUrl = effectiveSettings.serverUrl,\n                epgUrls = listOf(effectiveSettings.xmlTvEndpoint()),\n                requestHeaders = M3U_PLAYLIST_REQUEST_HEADERS,\n            )\n            channels\n'''
+          new_load = '''            LiveTvStorage.saveLocalPlaylistData("")\n            LiveTvStorage.saveSourceType(LiveTvSourceType.Xtream)\n            LiveTvStorage.saveXtreamSettings(effectiveSettings)\n            val favoriteUrls = mutableUiState.value.favoriteUrls\n            val hasFavoriteXtreamChannels = channels.any { channel ->\n                channel.streamUrl in favoriteUrls && !channel.xtreamStreamId.isNullOrBlank()\n            }\n            mutableUiState.value = LiveTvUiState(\n                sourceType = LiveTvSourceType.Xtream,\n                sourceUrl = effectiveSettings.serverUrl,\n                stalkerSettings = mutableUiState.value.stalkerSettings,\n                xtreamSettings = effectiveSettings,\n                channels = channels,\n                favoriteUrls = favoriteUrls,\n                recentChannel = mutableUiState.value.recentChannel,\n                isEpgLoading = hasFavoriteXtreamChannels,\n                isLoaded = true,\n            )\n            loadXtreamFavoriteEpgInBackground(effectiveSettings)\n            channels\n'''
+          repo = replace_once(repo, old_load, new_load, "Xtream load EPG")
+
+          toggle_anchor = '''        mutableUiState.value = state.copy(\n            favoriteUrls = favorites,\n            programmesByChannel = retainedProgrammes,\n        )\n\n        if (\n            !channel.tvgId.isNullOrBlank() &&\n'''
+          toggle_new = '''        mutableUiState.value = state.copy(\n            favoriteUrls = favorites,\n            programmesByChannel = retainedProgrammes,\n        )\n\n        if (state.sourceType == LiveTvSourceType.Xtream && state.xtreamSettings.isConfigured) {\n            favoriteEpgReloadJob?.cancel()\n            favoriteEpgReloadJob = epgScope.launch {\n                delay(250L)\n                val latestState = mutableUiState.value\n                if (latestState.sourceType == LiveTvSourceType.Xtream && latestState.xtreamSettings.isConfigured) {\n                    loadXtreamFavoriteEpgInBackground(latestState.xtreamSettings)\n                }\n            }\n            return\n        }\n\n        if (\n            !channel.tvgId.isNullOrBlank() &&\n'''
+          repo = replace_once(repo, toggle_anchor, toggle_new, "Xtream favorite reload")
+
+          xtream_loader = '''    private fun loadXtreamFavoriteEpgInBackground(settings: LiveTvXtreamSettings) {\n        activeEpgSourceUrl = null\n        activeEpgUrls = emptyList()\n        activeEpgRequestHeaders = emptyMap()\n        epgJob?.cancel()\n\n        val state = mutableUiState.value\n        if (state.sourceType != LiveTvSourceType.Xtream || state.xtreamSettings != settings) {\n            return\n        }\n        val favoriteChannels = state.channels.filter { channel ->\n            channel.streamUrl in state.favoriteUrls && !channel.xtreamStreamId.isNullOrBlank()\n        }\n        if (favoriteChannels.isEmpty()) {\n            mutableUiState.value = state.copy(\n                programmesByChannel = emptyMap(),\n                currentProgrammes = emptyMap(),\n                isEpgLoading = false,\n            )\n            return\n        }\n\n        val sourceUrl = state.sourceUrl\n        mutableUiState.value = state.copy(isEpgLoading = true)\n        epgJob = epgScope.launch {\n            val nowEpochMs = LiveTvClock.nowEpochMs()\n            val semaphore = Semaphore(XTREAM_EPG_MAX_CONCURRENCY)\n            val schedules = coroutineScope {\n                favoriteChannels.map { channel ->\n                    async {\n                        semaphore.withPermit {\n                            val programmes = withTimeoutOrNull(XTREAM_EPG_REQUEST_TIMEOUT_MS) {\n                                runCatching {\n                                    LiveTvRepositoryXtream.getFavoriteEpg(\n                                        settings = settings,\n                                        streamId = channel.xtreamStreamId.orEmpty(),\n                                        nowEpochMs = nowEpochMs,\n                                    )\n                                }.getOrDefault(emptyList())\n                            }.orEmpty()\n                            channel.epgKey() to programmes\n                        }\n                    }\n                }.awaitAll().toMap()\n            }\n            if (!isActive) return@launch\n\n            val latestState = mutableUiState.value\n            if (\n                latestState.sourceType == LiveTvSourceType.Xtream &&\n                latestState.sourceUrl == sourceUrl &&\n                latestState.xtreamSettings == settings\n            ) {\n                val favoriteKeys = latestState.channels\n                    .asSequence()\n                    .filter { channel -> channel.streamUrl in latestState.favoriteUrls }\n                    .map(LiveTvChannel::epgKey)\n                    .toSet()\n                val filteredSchedules = schedules\n                    .filterKeys { key -> key in favoriteKeys }\n                    .filterValues(List<LiveTvProgramme>::isNotEmpty)\n                mutableUiState.value = latestState.copy(\n                    programmesByChannel = filteredSchedules,\n                    currentProgrammes = currentXmlTvProgrammes(filteredSchedules, nowEpochMs),\n                    isEpgLoading = false,\n                )\n            }\n        }\n    }\n\n'''
+          if 'private fun loadXtreamFavoriteEpgInBackground' not in repo:
+              repo = repo.replace('    private fun loadEpgInBackground(\n', xtream_loader + '    private fun loadEpgInBackground(\n', 1)
+
+          repo = replace_once(
+              repo,
+              '                stalkerCommand = command,\n',
+              '                stalkerCommand = command,\n',
+              "stalker no-op guard",
+          )
+          stream_anchor = '''                group = categoryId?.let(categories::get).orEmpty(),\n                headers = M3U_STREAM_REQUEST_HEADERS,\n            )\n'''
+          stream_new = '''                group = categoryId?.let(categories::get).orEmpty(),\n                headers = M3U_STREAM_REQUEST_HEADERS,\n                xtreamStreamId = streamId,\n            )\n'''
+          repo = replace_once(repo, stream_anchor, stream_new, "Xtream channel stream id")
+
+          epg_method = '''\n    suspend fun getFavoriteEpg(\n        settings: LiveTvXtreamSettings,\n        streamId: String,\n        nowEpochMs: Long,\n    ): List<LiveTvProgramme> {\n        if (streamId.isBlank()) return emptyList()\n        val parameters = mapOf(\n            "stream_id" to streamId,\n            "limit" to XTREAM_EPG_LIMIT.toString(),\n        )\n        val shortEpg = runCatching {\n            request(\n                settings = settings,\n                action = "get_short_epg",\n                extraParameters = parameters,\n            )\n        }.getOrNull()?.let { response ->\n            parseXtreamEpgListings(response, nowEpochMs)\n        }.orEmpty()\n        if (shortEpg.isNotEmpty()) return shortEpg\n\n        return runCatching {\n            request(\n                settings = settings,\n                action = "get_simple_data_table",\n                extraParameters = mapOf("stream_id" to streamId),\n            )\n        }.getOrNull()?.let { response ->\n            parseXtreamEpgListings(response, nowEpochMs)\n        }.orEmpty()\n    }\n'''
+          request_marker = '''\n    private suspend fun request(\n        settings: LiveTvXtreamSettings,\n'''
+          if 'suspend fun getFavoriteEpg(' not in repo:
+              repo = repo.replace(request_marker, epg_method + request_marker, 1)
+
+          parser = '''\ninternal fun parseXtreamEpgListings(\n    data: JsonElement,\n    nowEpochMs: Long = LiveTvClock.nowEpochMs(),\n): List<LiveTvProgramme> {\n    val listings = (data as? JsonObject)?.arrayValue("epg_listings").orEmpty()\n    return listings.mapNotNull { element ->\n        val obj = element as? JsonObject ?: return@mapNotNull null\n        val startEpochMs = obj.stringValue("start_timestamp").toXtreamEpochMs() ?: return@mapNotNull null\n        val stopEpochMs = obj.stringValue("stop_timestamp").toXtreamEpochMs() ?: return@mapNotNull null\n        if (stopEpochMs <= startEpochMs || stopEpochMs <= nowEpochMs) return@mapNotNull null\n        val title = decodeXtreamText(obj.stringValue("title")).ifBlank { "Untitled" }\n        LiveTvProgramme(\n            title = title,\n            startEpochMs = startEpochMs,\n            stopEpochMs = stopEpochMs,\n            timeLabel = "${LiveTvClock.formatLocalTime(startEpochMs)} – ${LiveTvClock.formatLocalTime(stopEpochMs)}",\n        )\n    }.sortedBy(LiveTvProgramme::startEpochMs)\n        .distinctBy { programme -> Triple(programme.startEpochMs, programme.stopEpochMs, programme.title) }\n}\n\nprivate fun String?.toXtreamEpochMs(): Long? {\n    val value = this?.trim()?.toLongOrNull() ?: return null\n    return if (value >= 10_000_000_000L) value else value * 1000L\n}\n\nprivate fun decodeXtreamText(value: String?): String {\n    val raw = value?.trim().orEmpty()\n    if (raw.isBlank()) return ""\n    val decoded = runCatching {\n        Base64.Default.decode(raw).decodeToString().trim()\n    }.getOrNull()\n    return decoded?.takeIf { candidate ->\n        candidate.isNotBlank() &&\n            '\\uFFFD' !in candidate &&\n            candidate.all { char -> char == '\\n' || char == '\\r' || char == '\\t' || char.code >= 32 }\n    } ?: raw\n}\n\n'''
+          if 'internal fun parseXtreamEpgListings(' not in repo:
+              repo = repo.replace('\nprivate object LiveTvRepositoryStalker {', parser + 'private object LiveTvRepositoryStalker {', 1)
+          repo_path.write_text(repo)
+
+          # LiveTvXtreamTest.kt
+          test_path = Path("composeApp/src/commonTest/kotlin/com/nuvio/app/features/livetv/LiveTvXtreamTest.kt")
+          test = test_path.read_text()
+          if 'kotlinx.serialization.json.Json' not in test:
+              test = test.replace('package com.nuvio.app.features.livetv\n\n', 'package com.nuvio.app.features.livetv\n\nimport kotlinx.serialization.json.Json\n')
+          if 'parsesBase64XtreamShortEpg' not in test:
+              insertion = '''\n    @Test\n    fun parsesBase64XtreamShortEpg() {\n        val response = Json.parseToJsonElement(\n            """{\"epg_listings\":[{\"title\":\"VGVzdCBTaG93\",\"start_timestamp\":\"1700000000\",\"stop_timestamp\":\"1700003600\"}]}""",\n        )\n\n        val programmes = parseXtreamEpgListings(\n            data = response,\n            nowEpochMs = 1_699_999_000_000L,\n        )\n\n        assertEquals(1, programmes.size)\n        assertEquals("Test Show", programmes.single().title)\n        assertEquals(1_700_000_000_000L, programmes.single().startEpochMs)\n        assertEquals(1_700_003_600_000L, programmes.single().stopEpochMs)\n    }\n\n    @Test\n    fun fallsBackToChannelIdWhenXtreamTvgIdIsMissing() {\n        val channel = LiveTvChannel(\n            id = "xtream-123-0",\n            name = "Demo",\n            streamUrl = "https://example.invalid/live/123.ts",\n            xtreamStreamId = "123",\n        )\n\n        assertEquals("xtream-123-0", channel.epgKey())\n    }\n'''
+              test = test.replace('\n}', insertion + '\n}', 1)
+          test_path.write_text(test)
+          PY
+          git diff --check
+
+      - name: Commit source fix if changed
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Favorites-only Xtream EPG fix already applied."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvModels.kt \
+                    composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt \
+                    composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvGuide.kt \
+                    composeApp/src/commonTest/kotlin/com/nuvio/app/features/livetv/LiveTvXtreamTest.kt
+            git commit -m "fix: load Xtream EPG only for favorite channels"
+            git push origin HEAD:feature/xtream-epg-categories
+          fi
+
+      - name: Create CI local properties
+        run: touch local.properties
+
+      - name: Build side-by-side Full APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+
+      - name: Upload guide-fix APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-vcrplus-xtream-guide-fix-debug
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
