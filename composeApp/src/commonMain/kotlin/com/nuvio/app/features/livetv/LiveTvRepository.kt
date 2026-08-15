@@ -50,6 +50,13 @@ object LiveTvRepository {
     }
 
     fun onProfileChanged() {
+        favoriteEpgReloadJob?.cancel()
+        favoriteEpgReloadJob = null
+        epgJob?.cancel()
+        epgJob = null
+        activeEpgSourceUrl = null
+        activeEpgUrls = emptyList()
+        activeEpgRequestHeaders = emptyMap()
         initialized = false
         mutableUiState.value = LiveTvUiState()
         ensureLoaded()
