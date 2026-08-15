@@ -918,6 +918,12 @@ private fun LiveTvXtreamSettingsCard(
             }
             .take(12)
     }
+    var categoryPickerExpanded by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(categories.size) {
+        if (categories.isNotEmpty() && selectedCategoryIds.isEmpty()) {
+            categoryPickerExpanded = true
+        }
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = tokens.colors.surface,
@@ -996,78 +1002,123 @@ private fun LiveTvXtreamSettingsCard(
                     onClick = onDiscoverCategories,
                 )
             } else {
-                Text(
-                    text = "${selectedCategoryIds.size} of ${categories.size} categories selected",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = tokens.colors.textPrimary,
-                )
-                NuvioInputField(
-                    value = categoryQuery,
-                    onValueChange = onCategoryQueryChange,
-                    placeholder = "Search categories",
-                )
-                Row(
+                Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    onClick = { categoryPickerExpanded = !categoryPickerExpanded },
+                    color = tokens.colors.surfaceCard,
+                    shape = tokens.shapes.compactCard,
+                    border = BorderStroke(NuvioTokens.Border.thin, tokens.colors.borderSubtle),
                 ) {
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        onClick = onSelectAllCategories,
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Select all")
-                    }
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        onClick = onClearCategories,
-                    ) {
-                        Text("Clear")
-                    }
-                }
-                visibleCategories.forEach { category ->
-                    val selected = category.id in selectedCategoryIds
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = { onToggleCategory(category.id) },
-                        color = if (selected) tokens.colors.overlaySelected else tokens.colors.surfaceCard,
-                        shape = tokens.shapes.compactCard,
-                        border = BorderStroke(
-                            NuvioTokens.Border.thin,
-                            if (selected) tokens.colors.accent.copy(alpha = 0.52f) else tokens.colors.borderSubtle,
-                        ),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(
-                                text = category.name,
-                                modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodyMedium,
+                                text = "Categories",
+                                style = MaterialTheme.typography.labelLarge,
                                 color = tokens.colors.textPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.SemiBold,
                             )
                             Text(
-                                text = if (selected) "✓" else "",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = tokens.colors.accent,
+                                text = "${selectedCategoryIds.size} of ${categories.size} selected",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = tokens.colors.textMuted,
                             )
                         }
+                        Text(
+                            text = if (categoryPickerExpanded) "Hide" else if (selectedCategoryIds.isEmpty()) "Choose" else "Change",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = tokens.colors.accent,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                 }
-                if (categories.count {
-                        categoryQuery.isBlank() || it.name.contains(categoryQuery, ignoreCase = true)
-                    } > visibleCategories.size
-                ) {
-                    Text(
-                        text = "Showing the first ${visibleCategories.size}. Search to narrow the list.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = tokens.colors.textMuted,
+
+                if (categoryPickerExpanded) {
+                    NuvioInputField(
+                        value = categoryQuery,
+                        onValueChange = onCategoryQueryChange,
+                        placeholder = "Search ${categories.size} categories",
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = onSelectAllCategories,
+                        ) {
+                            Text("Select all")
+                        }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = selectedCategoryIds.isNotEmpty(),
+                            onClick = onClearCategories,
+                        ) {
+                            Text("Clear")
+                        }
+                    }
+                    visibleCategories.forEach { category ->
+                        val selected = category.id in selectedCategoryIds
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onToggleCategory(category.id) },
+                            color = if (selected) tokens.colors.overlaySelected else tokens.colors.surfaceCard,
+                            shape = tokens.shapes.compactCard,
+                            border = BorderStroke(
+                                NuvioTokens.Border.thin,
+                                if (selected) tokens.colors.accent.copy(alpha = 0.52f) else tokens.colors.borderSubtle,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = category.name,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = tokens.colors.textPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (selected) {
+                                    Text(
+                                        text = "✓",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = tokens.colors.accent,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (categories.count {
+                            categoryQuery.isBlank() || it.name.contains(categoryQuery, ignoreCase = true)
+                        } > visibleCategories.size
+                    ) {
+                        Text(
+                            text = "Showing ${visibleCategories.size} matches. Search to narrow the list.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tokens.colors.textMuted,
+                        )
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { categoryPickerExpanded = false },
+                    ) {
+                        Text("Done · ${selectedCategoryIds.size} selected")
+                    }
                 }
+
                 NuvioPrimaryButton(
-                    text = "Load selected channels",
+                    text = if (selectedCategoryIds.isEmpty()) {
+                        "Choose categories"
+                    } else {
+                        "Load channels · ${selectedCategoryIds.size} categories"
+                    },
                     enabled = selectedCategoryIds.isNotEmpty() && !isLoading,
                     onClick = onLoad,
                 )
