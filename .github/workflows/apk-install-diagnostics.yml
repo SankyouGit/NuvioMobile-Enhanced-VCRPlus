@@ -6,28 +6,29 @@ on:
       - ci/apk-install-diagnostics
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v6
-      - name: Create CI local properties
-        run: touch local.properties
-      - name: Build side-by-side APK
-        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+      - name: Download exact side-by-side artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gh api repos/${{ github.repository }}/actions/artifacts/9240051884/zip > artifact.zip
+          unzip -q artifact.zip -d artifact
+          find artifact -maxdepth 3 -type f -print
       - name: Inspect APK
         shell: bash
         run: |
           set -euxo pipefail
-          APK=$(find androidApp/build/outputs/apk/full/debug -name '*.apk' -type f | head -1)
+          APK=$(find artifact -name '*.apk' -type f | head -1)
+          test -n "$APK"
           echo "APK=$APK"
           ls -lh "$APK"
           sha256sum "$APK"
