@@ -13,10 +13,11 @@ private val fullXmlTvAttributeRegex = Regex("""([\w-]+)="([^"]*)"""")
 /**
  * Parses XMLTV without retaining an entire provider guide in memory.
  *
- * Current programmes are kept for every channel in the loaded playlist so the existing Live TV
- * list continues to show what is airing now. Future programmes are retained only for favorite
- * channels because the full guide is favorites-only. Provider channels that are not present in the
- * loaded playlist are skipped entirely.
+ * Current programmes are kept for every mapped channel in the loaded playlist so the existing
+ * Live TV list continues to show what is airing now. Future programmes are retained only for
+ * favorite channels because the full guide is favorites-only. Provider channels that are not
+ * present in the loaded playlist are skipped entirely. A loaded playlist with no tvg-id values
+ * therefore retains no provider programmes.
  *
  * Tests and compatibility callers can supply explicit channel sets. When no sets are supplied and
  * no playlist is loaded, all channels are treated as relevant so the parser remains independently
@@ -34,7 +35,11 @@ internal fun parseXmlTvProgrammeSchedule(
         .map(String::trim)
         .filter(String::isNotBlank)
         .toSet()
-    val inferredRelevantChannelIds = loadedChannelIds.takeIf(Set<String>::isNotEmpty)
+    val inferredRelevantChannelIds = if (liveState.channels.isEmpty()) {
+        null
+    } else {
+        loadedChannelIds
+    }
     val favoriteChannelIds = liveState.channels
         .asSequence()
         .filter { channel -> channel.streamUrl in liveState.favoriteUrls }
