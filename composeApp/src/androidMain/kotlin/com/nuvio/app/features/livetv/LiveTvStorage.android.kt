@@ -15,6 +15,7 @@ actual object LiveTvStorage {
     private const val xtreamServerUrlKey = "xtream_server_url"
     private const val xtreamUsernameKey = "xtream_username"
     private const val xtreamPasswordKey = "xtream_password"
+    private const val xtreamCategoryIdsKey = "xtream_category_ids"
     private const val favoriteUrlsKey = "favorite_channel_urls"
     private const val recentChannelUrlKey = "recent_channel_url"
     private const val recentChannelNameKey = "recent_channel_name"
@@ -103,6 +104,12 @@ actual object LiveTvStorage {
             serverUrl = preferences?.getScopedString(xtreamServerUrlKey).orEmpty(),
             username = preferences?.getScopedString(xtreamUsernameKey).orEmpty(),
             password = preferences?.getScopedString(xtreamPasswordKey).orEmpty(),
+            selectedCategoryIds = preferences?.getScopedString(xtreamCategoryIdsKey)
+                ?.lineSequence()
+                ?.map(String::trim)
+                ?.filter(String::isNotBlank)
+                ?.toSet()
+                .orEmpty(),
         )
     }
 
@@ -111,6 +118,7 @@ actual object LiveTvStorage {
             putScopedString(xtreamServerUrlKey, settings.serverUrl)
             putScopedString(xtreamUsernameKey, settings.username)
             putScopedString(xtreamPasswordKey, settings.password)
+            putScopedString(xtreamCategoryIdsKey, settings.selectedCategoryIds.sorted().joinToString("\n"))
         }?.apply()
     }
 

@@ -31,6 +31,11 @@ data class LiveTvProgramme(
     val timeLabel: String,
 )
 
+data class LiveTvXtreamCategory(
+    val id: String,
+    val name: String,
+)
+
 data class LiveTvUiState(
     val sourceType: LiveTvSourceType = LiveTvSourceType.M3u,
     val sourceUrl: String = "",
@@ -67,6 +72,7 @@ data class LiveTvXtreamSettings(
     val serverUrl: String = "",
     val username: String = "",
     val password: String = "",
+    val selectedCategoryIds: Set<String> = emptySet(),
 ) {
     val isConfigured: Boolean
         get() = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank()
