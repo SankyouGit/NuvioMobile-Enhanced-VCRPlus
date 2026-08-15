@@ -252,9 +252,6 @@ object LiveTvRepository {
         }
 
         mutableUiState.value = mutableUiState.value.copy(
-            sourceType = LiveTvSourceType.Xtream,
-            sourceUrl = normalizedSettings.serverUrl,
-            xtreamSettings = normalizedSettings,
             isLoading = true,
             errorMessage = null,
         )
@@ -267,11 +264,7 @@ object LiveTvRepository {
                 .map { (id, name) -> LiveTvXtreamCategory(id = id, name = name) }
                 .sortedBy { it.name.lowercase() }
             require(categories.isNotEmpty()) { "No live categories were found for this Xtream provider." }
-            val validSelection = normalizedSettings.selectedCategoryIds.intersect(categoryMap.keys)
             mutableUiState.value = mutableUiState.value.copy(
-                sourceType = LiveTvSourceType.Xtream,
-                sourceUrl = normalizedSettings.serverUrl,
-                xtreamSettings = normalizedSettings.copy(selectedCategoryIds = validSelection),
                 isLoading = false,
                 errorMessage = null,
             )
@@ -561,6 +554,7 @@ private object LiveTvRepositoryXtream {
         val data = if (selectedCategoryIds.isEmpty()) {
             request(settings, action = "get_live_streams").jsonArrayOrEmpty()
         } else {
+            var scopedRequestFailed = false
             val scopedData = selectedCategoryIds
                 .sorted()
                 .flatMap { categoryId ->
@@ -570,9 +564,12 @@ private object LiveTvRepositoryXtream {
                             action = "get_live_streams",
                             extraParameters = mapOf("category_id" to categoryId),
                         ).jsonArrayOrEmpty()
-                    }.getOrElse { emptyList() }
+                    }.getOrElse {
+                        scopedRequestFailed = true
+                        emptyList()
+                    }
                 }
-            if (scopedData.isNotEmpty()) {
+            if (!scopedRequestFailed) {
                 scopedData
             } else {
                 request(settings, action = "get_live_streams")
