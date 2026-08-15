@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   fix-and-build:
-    if: ${{ !contains(github.event.head_commit.message, '[xtream-review-fixed]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -23,7 +22,7 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Apply review fixes
+      - name: Apply review fixes if needed
         shell: bash
         run: |
           python3 - <<'PY'
@@ -31,8 +30,9 @@ jobs:
 
           path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt")
           text = path.read_text()
+          changed = False
 
-          old_discovery_start = '''        mutableUiState.value = mutableUiState.value.copy(
+          old_discovery = '''        mutableUiState.value = mutableUiState.value.copy(
             sourceType = LiveTvSourceType.Xtream,
             sourceUrl = normalizedSettings.serverUrl,
             xtreamSettings = normalizedSettings,
@@ -58,7 +58,7 @@ jobs:
             )
             categories
 '''
-          new_discovery_start = '''        mutableUiState.value = mutableUiState.value.copy(
+          new_discovery = '''        mutableUiState.value = mutableUiState.value.copy(
             isLoading = true,
             errorMessage = null,
         )
@@ -77,9 +77,11 @@ jobs:
             )
             categories
 '''
-          if text.count(old_discovery_start) != 1:
-              raise SystemExit("Discovery-state marker missing or ambiguous")
-          text = text.replace(old_discovery_start, new_discovery_start, 1)
+          if old_discovery in text:
+              text = text.replace(old_discovery, new_discovery, 1)
+              changed = True
+          elif new_discovery not in text:
+              raise SystemExit("Xtream discovery marker is in an unexpected state")
 
           old_scoped = '''            val scopedData = selectedCategoryIds
                 .sorted()
@@ -129,22 +131,29 @@ jobs:
                     }
             }
 '''
-          if text.count(old_scoped) != 1:
-              raise SystemExit("Scoped-request marker missing or ambiguous")
-          text = text.replace(old_scoped, new_scoped, 1)
-          path.write_text(text)
-          PY
+          if old_scoped in text:
+              text = text.replace(old_scoped, new_scoped, 1)
+              changed = True
+          elif new_scoped not in text:
+              raise SystemExit("Xtream scoped-request marker is in an unexpected state")
 
+          if changed:
+              path.write_text(text)
+          PY
           git diff --check
 
-      - name: Commit review fixes
+      - name: Commit review fixes if changed
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt
-          git commit -m "fix: keep Xtream discovery non-destructive [xtream-review-fixed]"
-          git push origin HEAD:feature/xtream-epg-categories
+          if git diff --quiet -- composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt; then
+            echo "Xtream review fixes already applied."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt
+            git commit -m "fix: keep Xtream discovery non-destructive"
+            git push origin HEAD:feature/xtream-epg-categories
+          fi
 
       - name: Create CI local properties
         run: touch local.properties
