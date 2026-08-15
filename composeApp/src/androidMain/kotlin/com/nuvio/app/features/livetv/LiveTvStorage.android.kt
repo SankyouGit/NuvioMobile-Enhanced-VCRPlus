@@ -98,12 +98,13 @@ actual object LiveTvStorage {
         }?.apply()
     }
 
-    actual fun loadXtreamSettings(): LiveTvXtreamSettings =
-        LiveTvXtreamSettings(
+    actual fun loadXtreamSettings(): LiveTvXtreamSettings {
+        return LiveTvXtreamSettings(
             serverUrl = preferences?.getScopedString(xtreamServerUrlKey).orEmpty(),
             username = preferences?.getScopedString(xtreamUsernameKey).orEmpty(),
             password = preferences?.getScopedString(xtreamPasswordKey).orEmpty(),
         )
+    }
 
     actual fun saveXtreamSettings(settings: LiveTvXtreamSettings) {
         preferences?.edit()?.apply {
