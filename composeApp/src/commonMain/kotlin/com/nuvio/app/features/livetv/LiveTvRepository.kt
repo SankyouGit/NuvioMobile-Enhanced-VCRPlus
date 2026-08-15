@@ -536,6 +536,7 @@ private suspend fun fetchXtreamChannels(
 }
 
 private object LiveTvRepositoryXtream {
+    private const val MAX_SCOPED_CATEGORY_REQUESTS = 24
     suspend fun getLiveCategories(settings: LiveTvXtreamSettings): Map<String, String> {
         val data = request(settings, action = "get_live_categories").jsonArrayOrEmpty()
         return data.associateNotNull { element ->
@@ -551,33 +552,48 @@ private object LiveTvRepositoryXtream {
         categories: Map<String, String>,
         selectedCategoryIds: Set<String> = emptySet(),
     ): List<LiveTvChannel> {
-        val data = if (selectedCategoryIds.isEmpty()) {
-            request(settings, action = "get_live_streams").jsonArrayOrEmpty()
-        } else {
-            var scopedRequestFailed = false
-            val scopedData = selectedCategoryIds
-                .sorted()
-                .flatMap { categoryId ->
-                    runCatching {
-                        request(
-                            settings = settings,
-                            action = "get_live_streams",
-                            extraParameters = mapOf("category_id" to categoryId),
-                        ).jsonArrayOrEmpty()
-                    }.getOrElse {
-                        scopedRequestFailed = true
-                        emptyList()
-                    }
-                }
-            if (!scopedRequestFailed) {
-                scopedData
-            } else {
+        val useUnscopedFilteredRequest = selectedCategoryIds.isNotEmpty() && (
+            selectedCategoryIds.size == categories.size ||
+                selectedCategoryIds.size > MAX_SCOPED_CATEGORY_REQUESTS
+            )
+        val data = when {
+            selectedCategoryIds.isEmpty() ->
+                request(settings, action = "get_live_streams").jsonArrayOrEmpty()
+
+            useUnscopedFilteredRequest ->
                 request(settings, action = "get_live_streams")
                     .jsonArrayOrEmpty()
                     .filter { element ->
                         val obj = element as? JsonObject
                         obj?.stringValue("category_id") in selectedCategoryIds
                     }
+
+            else -> {
+                var scopedRequestFailed = false
+                val scopedData = selectedCategoryIds
+                    .sorted()
+                    .flatMap { categoryId ->
+                        runCatching {
+                            request(
+                                settings = settings,
+                                action = "get_live_streams",
+                                extraParameters = mapOf("category_id" to categoryId),
+                            ).jsonArrayOrEmpty()
+                        }.getOrElse {
+                            scopedRequestFailed = true
+                            emptyList()
+                        }
+                    }
+                if (!scopedRequestFailed) {
+                    scopedData
+                } else {
+                    request(settings, action = "get_live_streams")
+                        .jsonArrayOrEmpty()
+                        .filter { element ->
+                            val obj = element as? JsonObject
+                            obj?.stringValue("category_id") in selectedCategoryIds
+                        }
+                }
             }
         }
 
