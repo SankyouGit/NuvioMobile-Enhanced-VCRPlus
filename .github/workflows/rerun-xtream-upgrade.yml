@@ -31,11 +31,26 @@ jobs:
 
           android = Path("composeApp/src/androidMain/kotlin/com/nuvio/app/features/livetv/LiveTvStorage.android.kt")
           text = android.read_text()
-          old = '''    actual fun loadXtreamSettings(): LiveTvXtreamSettings =\n        LiveTvXtreamSettings(\n'''
-          new = '''    actual fun loadXtreamSettings(): LiveTvXtreamSettings {\n        return LiveTvXtreamSettings(\n'''
-          if old not in text:
-              raise SystemExit("Android Xtream storage normalization marker missing")
-          android.write_text(text.replace(old, new, 1))
+          old_header = '''    actual fun loadXtreamSettings(): LiveTvXtreamSettings =
+        LiveTvXtreamSettings(
+'''
+          new_header = '''    actual fun loadXtreamSettings(): LiveTvXtreamSettings {
+        return LiveTvXtreamSettings(
+'''
+          old_boundary = '''            password = preferences?.getScopedString(xtreamPasswordKey).orEmpty(),
+        )
+
+    actual fun saveXtreamSettings'''
+          new_boundary = '''            password = preferences?.getScopedString(xtreamPasswordKey).orEmpty(),
+        )
+    }
+
+    actual fun saveXtreamSettings'''
+          if old_header not in text or old_boundary not in text:
+              raise SystemExit("Android Xtream storage normalization markers missing")
+          text = text.replace(old_header, new_header, 1)
+          text = text.replace(old_boundary, new_boundary, 1)
+          android.write_text(text)
 
           workflow = Path(".github/workflows/apply-xtream-upgrade.yml").read_text()
           marker = "          python3 - <<'PY'\n"
