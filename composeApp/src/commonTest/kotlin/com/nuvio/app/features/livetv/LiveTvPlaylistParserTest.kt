@@ -164,6 +164,27 @@ class LiveTvPlaylistParserTest {
     }
 
     @Test
+    fun dropsProviderProgrammesWhenNoChannelIdsAreRelevant() {
+        val schedule = parseXmlTvProgrammeSchedule(
+            content = """
+                <tv>
+                    <programme start="20240101003000 +0000" stop="20240101010000 +0000" channel="provider-one">
+                        <title>Provider Current</title>
+                    </programme>
+                    <programme start="20240101010000 +0000" stop="20240101020000 +0000" channel="provider-one">
+                        <title>Provider Future</title>
+                    </programme>
+                </tv>
+            """.trimIndent(),
+            nowEpochMs = 1704069900000L,
+            relevantChannelIds = emptySet(),
+            retainedScheduleChannelIds = emptySet(),
+        )
+
+        assertEquals(emptyMap(), schedule)
+    }
+
+    @Test
     fun mergesAndDeduplicatesXmlTvSchedules() {
         val first = LiveTvProgramme(
             title = "First",
