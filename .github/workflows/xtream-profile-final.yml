@@ -1,0 +1,86 @@
+name: Xtream Profile Final Validation
+
+on:
+  push:
+    branches:
+      - feature/xtream-epg-categories
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/xtream-epg-categories
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Cancel EPG work on profile changes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt")
+          text = path.read_text()
+          old = "\n".join([
+              "    fun onProfileChanged() {",
+              "        initialized = false",
+              "        mutableUiState.value = LiveTvUiState()",
+              "        ensureLoaded()",
+              "    }",
+          ])
+          new = "\n".join([
+              "    fun onProfileChanged() {",
+              "        favoriteEpgReloadJob?.cancel()",
+              "        favoriteEpgReloadJob = null",
+              "        epgJob?.cancel()",
+              "        epgJob = null",
+              "        activeEpgSourceUrl = null",
+              "        activeEpgUrls = emptyList()",
+              "        activeEpgRequestHeaders = emptyMap()",
+              "        initialized = false",
+              "        mutableUiState.value = LiveTvUiState()",
+              "        ensureLoaded()",
+              "    }",
+          ])
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit("Profile-change EPG block is in an unexpected state")
+          PY
+          git diff --check
+
+      - name: Commit profile-safety fix if changed
+        shell: bash
+        run: |
+          if git diff --quiet -- composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt; then
+            echo "Profile EPG safety fix already applied."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add composeApp/src/commonMain/kotlin/com/nuvio/app/features/livetv/LiveTvRepository.kt
+            git commit -m "fix: cancel EPG work when Live TV profile changes"
+            git push origin HEAD:feature/xtream-epg-categories
+          fi
+
+      - name: Create CI local properties
+        run: touch local.properties
+
+      - name: Build side-by-side Full APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
+
+      - name: Upload final Xtream test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-vcrplus-xtream-final-debug
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
