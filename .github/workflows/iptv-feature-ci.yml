@@ -38,13 +38,13 @@ jobs:
       - name: Create CI local properties
         run: touch local.properties
 
-      - name: Compile full IPTV debug APK
-        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full --stacktrace
+      - name: Compile side-by-side full IPTV debug APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full -PnuvioDebugApplicationId=com.nuvio.enhanced.vcrplus --stacktrace
 
-      - name: Upload full IPTV debug APK
+      - name: Upload side-by-side full IPTV debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: nuvio-vcrplus-full-debug
+          name: nuvio-vcrplus-side-by-side-debug
           path: androidApp/build/outputs/apk/full/debug/*.apk
           if-no-files-found: error
           retention-days: 7
