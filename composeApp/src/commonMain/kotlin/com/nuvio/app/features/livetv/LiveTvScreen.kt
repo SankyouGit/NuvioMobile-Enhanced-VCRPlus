@@ -110,6 +110,7 @@ fun LiveTvScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var selectedGroup by rememberSaveable { mutableStateOf("") }
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
+    var showingGuide by rememberSaveable { mutableStateOf(false) }
     var editingSource by rememberSaveable { mutableStateOf(uiState.sourceUrl.isBlank()) }
     var showingAdvancedSettings by rememberSaveable { mutableStateOf(false) }
     var stalkerPortalUrl by rememberSaveable { mutableStateOf(uiState.stalkerSettings.portalUrl) }
@@ -253,6 +254,19 @@ fun LiveTvScreen(
         }
     }
 
+    if (showingGuide) {
+        LiveTvFavoritesGuide(
+            channels = uiState.channels,
+            favoriteUrls = uiState.favoriteUrls,
+            programmesByChannel = uiState.programmesByChannel,
+            isEpgLoading = uiState.isEpgLoading,
+            onChannelClick = playChannel,
+            onBack = { showingGuide = false },
+            modifier = modifier,
+        )
+        return
+    }
+
     NuvioScreen(
         modifier = modifier,
         horizontalPadding = 16.dp,
@@ -323,6 +337,11 @@ fun LiveTvScreen(
                         onClick = { showingAdvancedSettings = true },
                     )
                     if (uiState.channels.isNotEmpty()) {
+                        NuvioIconActionButton(
+                            icon = Icons.Rounded.Tv,
+                            contentDescription = "Favorites TV guide",
+                            onClick = { showingGuide = true },
+                        )
                         NuvioIconActionButton(
                             icon = Icons.Rounded.Refresh,
                             contentDescription = stringResource(Res.string.live_tv_refresh),
