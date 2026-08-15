@@ -16,9 +16,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -38,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,10 +50,12 @@ import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioTokens
 import com.nuvio.app.core.ui.PlatformBackHandler
 import com.nuvio.app.core.ui.nuvio
+import kotlinx.coroutines.delay
 
 private const val GUIDE_MINUTE_MS = 60_000L
 private const val GUIDE_HOUR_MS = 60L * GUIDE_MINUTE_MS
 private const val GUIDE_PAGE_MS = 24L * GUIDE_HOUR_MS
+private const val GUIDE_CLOCK_TICK_MS = 30_000L
 private val GUIDE_CHANNEL_WIDTH = 136.dp
 private val GUIDE_ROW_HEIGHT = 82.dp
 private val GUIDE_TIME_HEADER_HEIGHT = 44.dp
@@ -73,15 +77,19 @@ internal fun LiveTvFavoritesGuide(
     val favoriteChannels = remember(channels, favoriteUrls) {
         channels.filter { channel -> channel.streamUrl in favoriteUrls }
     }
-    val nowEpochMs = remember(programmesByChannel) { LiveTvClock.nowEpochMs() }
-    val basePageStartEpochMs = remember(nowEpochMs) {
-        nowEpochMs - (nowEpochMs % GUIDE_HOUR_MS)
-    }
     val favoriteProgrammes = remember(favoriteChannels, programmesByChannel) {
         favoriteChannels.flatMap { channel ->
             channel.tvgId?.let(programmesByChannel::get).orEmpty()
         }
     }
+
+    var nowEpochMs by remember { mutableStateOf(LiveTvClock.nowEpochMs()) }
+    var pageOffset by remember { mutableStateOf(0) }
+    var basePageStartEpochMs by remember(nowEpochMs) {
+        mutableStateOf(nowEpochMs.floorToGuideHour())
+    }
+    val horizontalScroll = rememberScrollState()
+
     val latestProgrammeStopEpochMs = remember(favoriteProgrammes, nowEpochMs) {
         favoriteProgrammes.maxOfOrNull(LiveTvProgramme::stopEpochMs) ?: nowEpochMs
     }
@@ -97,22 +105,32 @@ internal fun LiveTvFavoritesGuide(
                 .coerceAtLeast(0)
         }
     }
-    var pageOffset by remember { mutableStateOf(0) }
-    val horizontalScroll = rememberScrollState()
-    val verticalScroll = rememberScrollState()
-
     val pageStartEpochMs = basePageStartEpochMs + (pageOffset * GUIDE_PAGE_MS)
     val pageEndEpochMs = pageStartEpochMs + GUIDE_PAGE_MS
     val canGoEarlier = pageOffset > 0
     val canGoLater = pageOffset < maxPageOffset
 
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(GUIDE_CLOCK_TICK_MS)
+            nowEpochMs = LiveTvClock.nowEpochMs()
+        }
+    }
+    LaunchedEffect(nowEpochMs, pageOffset) {
+        if (pageOffset == 0) {
+            val currentHour = nowEpochMs.floorToGuideHour()
+            if (basePageStartEpochMs != currentHour) {
+                basePageStartEpochMs = currentHour
+            }
+        }
+    }
     LaunchedEffect(maxPageOffset) {
         if (pageOffset > maxPageOffset) pageOffset = maxPageOffset
     }
-    LaunchedEffect(pageOffset) {
+    LaunchedEffect(pageOffset, basePageStartEpochMs) {
         horizontalScroll.scrollTo(0)
-        verticalScroll.scrollTo(0)
     }
+
     PlatformBackHandler(enabled = true, onBack = onBack)
 
     Column(
@@ -123,7 +141,7 @@ internal fun LiveTvFavoritesGuide(
     ) {
         NuvioScreenHeader(
             title = "Favorites TV Guide",
-            includeStatusBarPadding = false,
+            includeStatusBarPadding = true,
             onBack = onBack,
         )
 
@@ -134,7 +152,11 @@ internal fun LiveTvFavoritesGuide(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    text = if (pageOffset == 0) "Now · next 24 hours" else "+${pageOffset * 24} to +${(pageOffset + 1) * 24} hours",
+                    text = if (pageOffset == 0) {
+                        "Now · next 24 hours"
+                    } else {
+                        "+${pageOffset * 24} to +${(pageOffset + 1) * 24} hours"
+                    },
                     style = MaterialTheme.typography.titleSmall,
                     color = tokens.colors.textPrimary,
                     fontWeight = FontWeight.SemiBold,
@@ -213,40 +235,90 @@ internal fun LiveTvFavoritesGuide(
             }
 
             else -> {
-                Box(
+                GuideGrid(
+                    channels = favoriteChannels,
+                    programmesByChannel = programmesByChannel,
+                    pageStartEpochMs = pageStartEpochMs,
+                    pageEndEpochMs = pageEndEpochMs,
+                    nowEpochMs = nowEpochMs,
+                    referenceProgramme = referenceProgramme,
+                    horizontalScroll = horizontalScroll,
+                    onChannelClick = onChannelClick,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f)
-                        .verticalScroll(verticalScroll),
+                        .weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GuideGrid(
+    channels: List<LiveTvChannel>,
+    programmesByChannel: Map<String, List<LiveTvProgramme>>,
+    pageStartEpochMs: Long,
+    pageEndEpochMs: Long,
+    nowEpochMs: Long,
+    referenceProgramme: LiveTvProgramme?,
+    horizontalScroll: androidx.compose.foundation.ScrollState,
+    onChannelClick: (LiveTvChannel) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(GUIDE_TIME_HEADER_HEIGHT),
+        ) {
+            GuideChannelHeaderCell()
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clipToBounds()
+                    .horizontalScroll(horizontalScroll),
+            ) {
+                GuideTimeHeader(
+                    pageStartEpochMs = pageStartEpochMs,
+                    referenceProgramme = referenceProgramme,
+                )
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        ) {
+            items(
+                items = channels,
+                key = { channel -> channel.id },
+            ) { channel ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(GUIDE_ROW_HEIGHT),
                 ) {
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        GuideChannelColumn(
-                            channels = favoriteChannels,
+                    GuideChannelCell(
+                        channel = channel,
+                        onClick = { onChannelClick(channel) },
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clipToBounds()
+                            .horizontalScroll(horizontalScroll),
+                    ) {
+                        GuideProgrammeRow(
+                            channel = channel,
+                            programmes = channel.tvgId?.let(programmesByChannel::get).orEmpty(),
+                            pageStartEpochMs = pageStartEpochMs,
+                            pageEndEpochMs = pageEndEpochMs,
+                            nowEpochMs = nowEpochMs,
                             onChannelClick = onChannelClick,
                         )
-
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .horizontalScroll(horizontalScroll),
-                        ) {
-                            Column(modifier = Modifier.width(GUIDE_TIMELINE_WIDTH)) {
-                                GuideTimeHeader(
-                                    pageStartEpochMs = pageStartEpochMs,
-                                    referenceProgramme = referenceProgramme,
-                                )
-                                favoriteChannels.forEach { channel ->
-                                    GuideProgrammeRow(
-                                        channel = channel,
-                                        programmes = channel.tvgId?.let(programmesByChannel::get).orEmpty(),
-                                        pageStartEpochMs = pageStartEpochMs,
-                                        pageEndEpochMs = pageEndEpochMs,
-                                        nowEpochMs = nowEpochMs,
-                                        onChannelClick = onChannelClick,
-                                    )
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -291,83 +363,80 @@ private fun GuideMessage(
 }
 
 @Composable
-private fun GuideChannelColumn(
-    channels: List<LiveTvChannel>,
-    onChannelClick: (LiveTvChannel) -> Unit,
-) {
+private fun GuideChannelHeaderCell() {
     val tokens = MaterialTheme.nuvio
-    Column(
+    Box(
         modifier = Modifier
             .width(GUIDE_CHANNEL_WIDTH)
-            .background(tokens.colors.background),
+            .fillMaxHeight()
+            .background(tokens.colors.background)
+            .padding(end = 8.dp),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(GUIDE_TIME_HEADER_HEIGHT)
-                .padding(end = 8.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                text = "CHANNEL",
-                style = MaterialTheme.typography.labelSmall,
-                color = tokens.colors.textMuted,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+        Text(
+            text = "CHANNEL",
+            style = MaterialTheme.typography.labelSmall,
+            color = tokens.colors.textMuted,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
 
-        channels.forEach { channel ->
-            Surface(
+@Composable
+private fun GuideChannelCell(
+    channel: LiveTvChannel,
+    onClick: () -> Unit,
+) {
+    val tokens = MaterialTheme.nuvio
+    Surface(
+        modifier = Modifier
+            .width(GUIDE_CHANNEL_WIDTH)
+            .fillMaxHeight()
+            .padding(end = 8.dp, bottom = 4.dp),
+        onClick = onClick,
+        color = tokens.colors.surface,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(NuvioTokens.Border.thin, tokens.colors.borderSubtle),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(GUIDE_ROW_HEIGHT)
-                    .padding(end = 8.dp, bottom = 4.dp),
-                onClick = { onChannelClick(channel) },
-                color = tokens.colors.surface,
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(NuvioTokens.Border.thin, tokens.colors.borderSubtle),
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(tokens.colors.overlaySelected),
+                contentAlignment = Alignment.Center,
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
+                if (!channel.logoUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = channel.logoUrl,
+                        contentDescription = channel.name,
                         modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(tokens.colors.overlaySelected),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (!channel.logoUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = channel.logoUrl,
-                                contentDescription = channel.name,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(4.dp),
-                                contentScale = ContentScale.Fit,
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Rounded.Tv,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = tokens.colors.accent,
-                            )
-                        }
-                    }
-                    Text(
-                        text = channel.name,
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = tokens.colors.textPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
+                            .fillMaxSize()
+                            .padding(4.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.Tv,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = tokens.colors.accent,
                     )
                 }
             }
+            Text(
+                text = channel.name,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = tokens.colors.textPrimary,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -508,6 +577,8 @@ private fun GuideProgrammeRow(
         }
     }
 }
+
+private fun Long.floorToGuideHour(): Long = this - (this % GUIDE_HOUR_MS)
 
 private fun durationToGuideDp(durationMs: Long): Dp =
     ((durationMs.toDouble() / GUIDE_MINUTE_MS.toDouble()) * GUIDE_DP_PER_MINUTE.value).dp
