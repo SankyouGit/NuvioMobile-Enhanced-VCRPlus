@@ -6,8 +6,10 @@ import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -25,7 +27,9 @@ object LiveTvRepository {
     private val mutableUiState = MutableStateFlow(LiveTvUiState())
     val uiState = mutableUiState.asStateFlow()
     private val epgScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val epgMutex = Mutex()
     private var epgJob: Job? = null
+    private var favoriteEpgReloadJob: Job? = null
     private var activeEpgSourceUrl: String? = null
     private var activeEpgUrls: List<String> = emptyList()
 
@@ -336,13 +340,22 @@ object LiveTvRepository {
         )
 
         if (
-            wasAdded &&
             !channel.tvgId.isNullOrBlank() &&
             activeEpgUrls.isNotEmpty() &&
             activeEpgSourceUrl == state.sourceUrl
         ) {
-            mutableUiState.value = mutableUiState.value.copy(isEpgLoading = true)
-            loadEpgInBackground(state.sourceUrl, activeEpgUrls)
+            favoriteEpgReloadJob?.cancel()
+            favoriteEpgReloadJob = epgScope.launch {
+                delay(600L)
+                val latestState = mutableUiState.value
+                if (
+                    activeEpgUrls.isNotEmpty() &&
+                    activeEpgSourceUrl == latestState.sourceUrl
+                ) {
+                    mutableUiState.value = latestState.copy(isEpgLoading = true)
+                    loadEpgInBackground(latestState.sourceUrl, activeEpgUrls)
+                }
+            }
         }
     }
 
@@ -364,24 +377,30 @@ object LiveTvRepository {
         epgJob?.cancel()
         if (epgUrls.isEmpty()) return
         epgJob = epgScope.launch {
-            val nowEpochMs = LiveTvClock.nowEpochMs()
-            val programmesByChannel = mergeXmlTvProgrammeSchedules(
-                epgUrls.mapNotNull { epgUrl ->
-                    runCatching {
-                        parseXmlTvProgrammeSchedule(
-                            content = httpGetText(epgUrl),
-                            nowEpochMs = nowEpochMs,
-                        )
-                    }.getOrNull()
-                },
-            )
-            if (!isActive) return@launch
-            if (mutableUiState.value.sourceUrl == sourceUrl) {
-                mutableUiState.value = mutableUiState.value.copy(
-                    programmesByChannel = programmesByChannel,
-                    currentProgrammes = currentXmlTvProgrammes(programmesByChannel, nowEpochMs),
-                    isEpgLoading = false,
+            epgMutex.lock()
+            try {
+                if (!isActive) return@launch
+                val nowEpochMs = LiveTvClock.nowEpochMs()
+                val programmesByChannel = mergeXmlTvProgrammeSchedules(
+                    epgUrls.mapNotNull { epgUrl ->
+                        runCatching {
+                            parseXmlTvProgrammeSchedule(
+                                content = httpGetText(epgUrl),
+                                nowEpochMs = nowEpochMs,
+                            )
+                        }.getOrNull()
+                    },
                 )
+                if (!isActive) return@launch
+                if (mutableUiState.value.sourceUrl == sourceUrl) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        programmesByChannel = programmesByChannel,
+                        currentProgrammes = currentXmlTvProgrammes(programmesByChannel, nowEpochMs),
+                        isEpgLoading = false,
+                    )
+                }
+            } finally {
+                epgMutex.unlock()
             }
         }
     }
